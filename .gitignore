@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller
+/build/
+/dist/
+*.spec
+
+# Database
+*.db
+*.db-journal*
+
+# IDE files
+.vscode/
+.idea/
