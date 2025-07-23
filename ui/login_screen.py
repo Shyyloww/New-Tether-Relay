@@ -1,4 +1,4 @@
-# ui/login_screen.py (Definitive, with Remember Me)
+# ui/login_screen.py
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLineEdit, QPushButton, QLabel, QStackedWidget, QCheckBox
 from PyQt6.QtCore import pyqtSignal, Qt
 
@@ -9,7 +9,6 @@ class LoginScreen(QWidget):
         login_widget = QWidget(); login_layout = QVBoxLayout(login_widget); login_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.username_input = QLineEdit(); self.username_input.setPlaceholderText("Username"); self.username_input.setFixedWidth(300)
         self.password_input = QLineEdit(); self.password_input.setPlaceholderText("Password"); self.password_input.setEchoMode(QLineEdit.EchoMode.Password); self.password_input.setFixedWidth(300)
-        # --- NEW: Remember Me Checkbox ---
         self.remember_me_checkbox = QCheckBox("Remember Me"); self.remember_me_checkbox.setChecked(True); login_layout.addWidget(self.remember_me_checkbox, alignment=Qt.AlignmentFlag.AlignCenter)
         login_button = QPushButton("Log In"); login_button.clicked.connect(self.handle_login); login_button.setFixedWidth(300)
         create_account_button = QPushButton("Create Account"); create_account_button.clicked.connect(lambda: self.stack.setCurrentIndex(1)); create_account_button.setFixedWidth(300)
@@ -31,7 +30,6 @@ class LoginScreen(QWidget):
         self.load_remembered_user()
 
     def load_remembered_user(self):
-        """Pre-populates the username if 'Remember Me' was used."""
         remembered_user = self.db.load_setting("remembered_user")
         if remembered_user: self.username_input.setText(remembered_user); self.remember_me_checkbox.setChecked(True)
         else: self.remember_me_checkbox.setChecked(False)
@@ -40,7 +38,7 @@ class LoginScreen(QWidget):
         username = self.username_input.text()
         if self.db.check_user(username, self.password_input.text()):
             if not self.remember_me_checkbox.isChecked():
-                self.db.save_setting("remembered_user", "") # Clear if unchecked
+                self.db.save_setting("remembered_user", "")
             self.feedback_label.setText(""); self.login_successful.emit(username)
         else: self.feedback_label.setText("<font color='red'>Invalid username or password.</font>")
 
