@@ -1,4 +1,4 @@
-# main.py
+# main.py (Full Code)
 import sys
 import psutil
 from PyQt6.QtWidgets import QApplication, QMainWindow, QStackedWidget
@@ -81,7 +81,8 @@ class MainWindow(QMainWindow):
             self.current_user = username
             
             self.dashboard_view = DashboardWindow(self.db, self.current_user)
-            self.session_view = SessionView()
+            # --- NEW: Pass the database manager to the SessionView ---
+            self.session_view = SessionView(self.db)
             
             self.stack.addWidget(self.dashboard_view)
             self.stack.addWidget(self.session_view)
@@ -93,7 +94,7 @@ class MainWindow(QMainWindow):
             self.session_view.back_requested.connect(lambda: self.stack.setCurrentWidget(self.dashboard_view))
             
             self.session_view.task_requested.connect(self.dashboard_view.send_task)
-            self.dashboard_view.response_received.connect(self.session_view.handle_command_response)
+            self.dashboard_view.response_received.connect(self.handle_response_routing)
 
         if self.dashboard_view:
             self.stack.setCurrentWidget(self.dashboard_view)
@@ -114,8 +115,28 @@ class MainWindow(QMainWindow):
             elif key == "padding_enabled":
                 self.dashboard_view.options_pane.handle_padding_status_change(value)
 
+    def handle_response_routing(self, session_id, response_data):
+        command = response_data.get("command")
+        output = response_data.get("output", {})
+        
+        # Centralized saving of all incoming data
+        if command and output.get("status") == "success":
+            self.db.save_result(session_id, command, output.get("data"))
+
+        if command == "Agent Event":
+            self.session_view.handle_agent_event(session_id, output)
+        else:
+            self.session_view.handle_command_response(session_id, response_data)
+
     def start_build(self, settings):
         self.dashboard_view.builder_pane.show_build_log_pane()
+        
+        use_simple_logs = self.db.load_setting("simple_logs", True)
+        settings["simple_logs"] = use_simple_logs
+        
+        self.dashboard_view.options_pane.set_build_controls_enabled(False)
+        self.dashboard_view.builder_pane.build_button.setEnabled(False)
+        
         self.build_thread = BuildThread(settings, RELAY_URL, self.current_user)
         self.build_thread.log_message.connect(self.dashboard_view.builder_pane.build_log_output.append)
         self.build_thread.finished.connect(self.on_build_finished)
@@ -128,6 +149,8 @@ class MainWindow(QMainWindow):
 
     def on_build_finished(self):
         if self.dashboard_view:
+            self.dashboard_view.options_pane.set_build_controls_enabled(True)
+            self.dashboard_view.builder_pane.build_button.setEnabled(True)
             self.dashboard_view.builder_pane.stop_build_button.setEnabled(False)
             self.dashboard_view.builder_pane.back_to_builder_button.show()
     

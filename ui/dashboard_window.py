@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QSplitter, QTableWidget, QVBo
                              QLabel, QHeaderView, QTableWidgetItem, QMenu, QInputDialog,
                              QPushButton)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QFont
 import requests, uuid
 from .builder_pane import BuilderPane
 from .options_pane import OptionsPane
@@ -130,33 +130,51 @@ class DashboardWindow(QWidget):
     def update_session_table(self, sessions_data):
         self.session_table.setSortingEnabled(False)
         self.session_table.setRowCount(0)
-        self.session_table.setRowCount(len(sessions_data))
         
+        small_font = QFont()
+        small_font.setPointSize(9)
+
         for row, (session_id, data) in enumerate(sessions_data.items()):
+            self.session_table.insertRow(row)
+            
+            # FINAL FIX: Set a fixed row height to prevent rendering glitches and ensure uniform size.
+            self.session_table.setRowHeight(row, 55)
+
             status = data.get('status', 'Offline')
 
-            status_widget_container = QWidget()
-            status_layout = QHBoxLayout(status_widget_container)
-            status_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            status_layout.setContentsMargins(5, 5, 5, 5)
-            status_label = QLabel(status.upper())
-            status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            status_label.setObjectName("StatusLabel")
-            status_label.setProperty("status", "online" if status == "Online" else "offline")
-            status_layout.addWidget(status_label)
-            self.session_table.setCellWidget(row, 0, status_widget_container)
+            status_button = QPushButton(status.upper())
+            status_button.setObjectName("StatusButton")
+            status_button.setProperty("status", "online" if status == "Online" else "offline")
+            status_button.setEnabled(False)
+            
+            container = QWidget()
+            layout = QHBoxLayout(container)
+            layout.addWidget(status_button)
+            layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.setContentsMargins(5,5,5,5)
+            self.session_table.setCellWidget(row, 0, container)
             
             metadata = data.get('metadata', {})
-            self.session_table.setItem(row, 1, QTableWidgetItem(metadata.get('user', 'N/A')))
-            self.session_table.setItem(row, 2, QTableWidgetItem(metadata.get('ip', 'N/A')))
-            self.session_table.setItem(row, 3, QTableWidgetItem(metadata.get('hostname', 'N/A')))
-            self.session_table.setItem(row, 4, QTableWidgetItem(session_id))
+            
+            user_item = QTableWidgetItem(metadata.get('user', 'N/A'))
+            ip_item = QTableWidgetItem(metadata.get('ip', 'N/A'))
+            hostname_item = QTableWidgetItem(metadata.get('hostname', 'N/A'))
+            session_id_item = QTableWidgetItem(session_id)
+
+            user_item.setFont(small_font)
+            ip_item.setFont(small_font)
+            hostname_item.setFont(small_font)
+            
+            items_to_set = [user_item, ip_item, hostname_item, session_id_item]
+            for col_index, item in enumerate(items_to_set, start=1):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.session_table.setItem(row, col_index, item)
             
             interact_button = QPushButton("Interact")
             interact_button.setObjectName("InteractButton")
             interact_button.clicked.connect(lambda checked, sid=session_id: self.session_interact_requested.emit(sid))
             self.session_table.setCellWidget(row, 5, interact_button)
-            
+        
         self.session_table.setSortingEnabled(True)
 
     def show_session_context_menu(self, pos):

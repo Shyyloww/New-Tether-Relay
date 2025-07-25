@@ -1,4 +1,4 @@
-# ui/options_pane.py (Definitive, with Sunset theme added to list)
+# ui/options_pane.py (Full Code)
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QGroupBox, QComboBox, 
                              QCheckBox, QPushButton, QLabel, QMessageBox, QFormLayout)
 from PyQt6.QtCore import pyqtSignal
@@ -18,7 +18,6 @@ class OptionsPane(QWidget):
         appearance_group = QGroupBox("Appearance")
         appearance_layout = QFormLayout(appearance_group)
         self.theme_selector = QComboBox()
-        # --- NEW: Added "Sunset" to the theme list ---
         self.theme_selector.addItems([
             "Dark (Default)", "Light", "Cyber", "Matrix", 
             "Sunrise", "Sunset", "Jungle", "Ocean", "Galaxy", "Candy"
@@ -46,9 +45,14 @@ class OptionsPane(QWidget):
         self.build_priority_combo.addItems(["Normal", "Low", "High"])
         self.build_priority_combo.currentTextChanged.connect(lambda val: self.setting_changed.emit("build_priority", val))
         
+        # FIX: Removed "(Recommended)" from the text
+        self.simple_logs_toggle = QCheckBox("Use Simple Build Logs")
+        self.simple_logs_toggle.stateChanged.connect(lambda state: self.setting_changed.emit("simple_logs", bool(state)))
+
         build_layout.addRow("Obfuscation Level:", self.obfuscation_selector)
         build_layout.addRow("Compression:", self.compression_selector)
         build_layout.addRow("Process Priority:", self.build_priority_combo)
+        build_layout.addRow(self.simple_logs_toggle)
         layout.addWidget(build_group)
         
         layout.addStretch()
@@ -73,6 +77,7 @@ class OptionsPane(QWidget):
         self.obfuscation_selector.setCurrentText(self.db.load_setting("obfuscation", "None"))
         self.compression_selector.setCurrentText(self.db.load_setting("compression", "None"))
         self.build_priority_combo.setCurrentText(self.db.load_setting("build_priority", "Normal"))
+        self.simple_logs_toggle.setChecked(self.db.load_setting("simple_logs", True))
         
     def handle_padding_status_change(self, is_padding_enabled):
         self.compression_selector.setEnabled(not is_padding_enabled)
@@ -94,3 +99,11 @@ class OptionsPane(QWidget):
         msg_box.setDefaultButton(QMessageBox.StandardButton.No)
         if msg_box.exec() == QMessageBox.StandardButton.Yes:
             self.sanitize_requested.emit()
+
+    # --- NEW: Method to disable controls during build ---
+    def set_build_controls_enabled(self, enabled):
+        """Enables or disables all controls related to the build process."""
+        self.obfuscation_selector.setEnabled(enabled)
+        self.compression_selector.setEnabled(enabled)
+        self.build_priority_combo.setEnabled(enabled)
+        self.simple_logs_toggle.setEnabled(enabled)
