@@ -1,11 +1,13 @@
-# ui/dashboard_window.py (Reworked for API Client)
+# ui/dashboard_window.py (Corrected Imports)
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QSplitter, QTableWidget, QVBoxLayout, 
                              QLabel, QHeaderView, QTableWidgetItem,
                              QPushButton)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
-from .builder_pane import BuilderPane
-from .options_pane import OptionsPane
+
+# Corrected: Imports are now absolute from the project root
+from ui.builder_pane import BuilderPane
+from ui.options_pane import OptionsPane
 
 class DashboardWindow(QWidget):
     build_requested = pyqtSignal(dict)

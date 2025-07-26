@@ -1,3 +1,12 @@
 Flask
 gunicorn
 gevent
+requests
+psutil
+PyQt6
+pyinstaller
+pyinstaller-versionfile
+pywin32; sys_platform == 'win32'
+cryptography
+mss
+Pillow

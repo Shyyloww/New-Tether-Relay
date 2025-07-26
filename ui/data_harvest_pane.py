@@ -1,8 +1,9 @@
-# ui/data_harvest_pane.py (Full Code, Real-Time Update Logic)
+# ui/data_harvest_pane.py (Full Code - Reworked for New API Model)
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QListWidget, QStackedWidget, 
                              QVBoxLayout, QTableWidget, QTextEdit, 
                              QHeaderView, QTableWidgetItem, QAbstractItemView, QSizePolicy)
 from PyQt6.QtCore import Qt
+import json
 
 class DataHarvestPane(QWidget):
     def __init__(self):
@@ -14,14 +15,15 @@ class DataHarvestPane(QWidget):
         self.category_list.setFixedWidth(240)
         self.category_list.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         
+        # --- List matches the 29 fields requested ---
         self.categories = [
-            "OS Version & Build", "System Architecture", "Hostname", "Users (and current)", "System Uptime",
-            "Hardware Info (CPU, GPU, RAM, Disks)", "Antivirus & Firewall Products", "Installed Applications",
-            "Running Processes", "Environment Variables", "MAC Address", "IP Addresses (IPv4, IPv6, Public, Private)",
-            "Wi-Fi Passwords", "Active Network Connections", "ARP Table (Local Network Devices)", "DNS Cache",
-            "Browser Passwords", "Session Cookies", "Windows Vault Credentials", "Application Credentials (e.g., FileZilla)",
-            "Discord Tokens", "Roblox Cookies", "SSH Keys", "Telegram Session Files", "Credit Card Data",
-            "Cryptocurrency Wallet Files", "Browser Autofill", "Browser History", "Clipboard Contents"
+            "System Info", "Hardware Info", "Security Products", "Installed Applications", 
+            "Running Processes", "Environment Variables", "Network Info", "Wi-Fi Passwords", 
+            "Active Connections", "ARP Table", "DNS Cache", "Browser Passwords", 
+            "Session Cookies", "Windows Vault Credentials", "Application Credentials", 
+            "Discord Tokens", "Roblox Cookies", "SSH Keys", "Telegram Session Files", 
+            "Credit Card Data", "Cryptocurrency Wallet Files", "Browser Autofill", 
+            "Browser History", "Clipboard Contents"
         ]
         self.category_list.addItems(self.categories)
         main_layout.addWidget(self.category_list)
@@ -29,63 +31,55 @@ class DataHarvestPane(QWidget):
         self.content_stack = QStackedWidget()
         main_layout.addWidget(self.content_stack, 1)
         
-        # --- Create a view for every category ---
-        self.views = {
-            "os_info": self._create_text_view(),
-            "hardware_info": self._create_text_view(),
-            "security_products": self._create_text_view(),
-            "installed_apps": self._create_text_view(is_mono=True),
-            "running_processes": self._create_text_view(is_mono=True),
-            "env_variables": self._create_text_view(is_mono=True),
-            "network_info": self._create_text_view(),
-            "wifi_passwords": self._create_table(["SSID", "Password"]),
-            "active_connections": self._create_text_view(is_mono=True),
-            "arp_table": self._create_text_view(is_mono=True),
-            "dns_cache": self._create_text_view(is_mono=True),
-            "browser_passwords": self._create_table(["URL", "Username", "Password"]),
-            "session_cookies": self._create_table(["Host", "Name", "Expires (UTC)", "Value"]),
-            "windows_vault": self._create_table(["Resource", "Username", "Password"]),
-            "filezilla": self._create_table(["Host", "Port", "Username", "Password"]),
-            "discord_tokens": self._create_text_view(is_mono=True),
-            "roblox_cookies": self._create_text_view(is_mono=True),
-            "ssh_keys": self._create_text_view(is_mono=True),
-            "telegram": self._create_text_view(),
-            "credit_cards": self._create_table(["Name on Card", "Expires (MM/YY)", "Card Number"]),
-            "crypto_wallets": self._create_text_view(is_mono=True),
-            "browser_autofill": self._create_table(["Field Name", "Value"]),
-            "browser_history": self._create_table(["URL", "Title", "Visit Count", "Last Visit (UTC)"]),
-            "clipboard": self._create_text_view(is_mono=True),
+        # --- Map the module_name from the payload to the UI widget ---
+        self.view_map = {
+            "System Info": self._create_text_view(),
+            "Hardware Info": self._create_text_view(),
+            "Security Products": self._create_text_view(),
+            "Installed Applications": self._create_text_view(is_mono=True),
+            "Running Processes": self._create_text_view(is_mono=True),
+            "Environment Variables": self._create_text_view(is_mono=True),
+            "Network Info": self._create_text_view(),
+            "Wi-Fi Passwords": self._create_table(["SSID", "Password"]),
+            "Active Network Connections": self._create_text_view(is_mono=True),
+            "ARP Table (Local Network Devices)": self._create_text_view(is_mono=True),
+            "DNS Cache": self._create_text_view(is_mono=True),
+            "Browser Passwords": self._create_table(["Browser", "Profile", "URL", "Username", "Password"]),
+            "Session Cookies": self._create_table(["Host", "Name", "Expires (UTC)", "Value"]),
+            "Windows Vault Credentials": self._create_table(["Resource", "Username", "Password"]),
+            "Application Credentials (e.g., FileZilla)": self._create_table(["Host", "Port", "Username", "Password"]),
+            "Discord Tokens": self._create_text_view(is_mono=True),
+            "Roblox Cookies": self._create_text_view(is_mono=True),
+            "SSH Keys": self._create_text_view(is_mono=True),
+            "Telegram Session Files": self._create_text_view(),
+            "Credit Card Data": self._create_table(["Name on Card", "Expires (MM/YY)", "Card Number"]),
+            "Cryptocurrency Wallet Files": self._create_text_view(is_mono=True),
+            "Browser Autofill Data": self._create_table(["Field Name", "Value"]),
+            "Browser History": self._create_table(["URL", "Title", "Visit Count", "Last Visit (UTC)"]),
+            "Clipboard Contents": self._create_text_view(is_mono=True),
         }
 
-        # Map command names to views
-        self.view_map = {
-            "os_info": self.views["os_info"], "hardware_info": self.views["hardware_info"], "security_products": self.views["security_products"],
-            "installed_apps": self.views["installed_apps"], "running_processes": self.views["running_processes"], "env_variables": self.views["env_variables"],
-            "network_info": self.views["network_info"], "wifi_passwords": self.views["wifi_passwords"], "active_connections": self.views["active_connections"],
-            "arp_table": self.views["arp_table"], "dns_cache": self.views["dns_cache"], "browser_passwords": self.views["browser_passwords"],
-            "session_cookies": self.views["session_cookies"], "windows_vault": self.views["windows_vault"], "filezilla": self.views["filezilla"],
-            "discord_tokens": self.views["discord_tokens"], "roblox_cookies": self.views["roblox_cookies"], "ssh_keys": self.views["ssh_keys"],
-            "telegram": self.views["telegram"], "credit_cards": self.views["credit_cards"], "crypto_wallets": self.views["crypto_wallets"],
-            "browser_autofill": self.views["browser_autofill"], "browser_history": self.views["browser_history"], "clipboard": self.views["clipboard"]
-        }
-        
-        # Create a flat list of widgets in the correct order for the QStackedWidget and category list
-        self.ordered_widgets = [
-            self.views["os_info"], self.views["os_info"], self.views["os_info"], self.views["os_info"], self.views["os_info"], # OS Info fields
-            self.views["hardware_info"], self.views["security_products"], self.views["installed_apps"], self.views["running_processes"],
-            self.views["env_variables"], self.views["network_info"], self.views["network_info"], self.views["wifi_passwords"],
-            self.views["active_connections"], self.views["arp_table"], self.views["dns_cache"], self.views["browser_passwords"],
-            self.views["session_cookies"], self.views["windows_vault"], self.views["filezilla"], self.views["discord_tokens"],
-            self.views["roblox_cookies"], self.views["ssh_keys"], self.views["telegram"], self.views["credit_cards"],
-            self.views["crypto_wallets"], self.views["browser_autofill"], self.views["browser_history"], self.views["clipboard"]
+        # Match list order to view_map keys
+        self.ordered_keys = [
+            "System Info", "Hardware Info", "Security Products", "Installed Applications", 
+            "Running Processes", "Environment Variables", "Network Info", "Wi-Fi Passwords", 
+            "Active Network Connections", "ARP Table (Local Network Devices)", "DNS Cache", "Browser Passwords", 
+            "Session Cookies", "Windows Vault Credentials", "Application Credentials (e.g., FileZilla)", 
+            "Discord Tokens", "Roblox Cookies", "SSH Keys", "Telegram Session Files", 
+            "Credit Card Data", "Cryptocurrency Wallet Files", "Browser Autofill Data", 
+            "Browser History", "Clipboard Contents"
         ]
 
-        for widget in self.ordered_widgets:
-            if self.content_stack.indexOf(widget) == -1:
-                self.content_stack.addWidget(widget)
+        for key in self.ordered_keys:
+            self.content_stack.addWidget(self.view_map[key])
 
-        self.category_list.currentItemChanged.connect(lambda current: self.content_stack.setCurrentWidget(self.ordered_widgets[self.category_list.row(current)]) if current else None)
-        self.category_list.setCurrentRow(0)
+        self.category_list.currentItemChanged.connect(self.on_category_change)
+        if self.category_list.count() > 0: self.category_list.setCurrentRow(0)
+
+    def on_category_change(self, current_item):
+        if not current_item: return
+        selected_key = self.ordered_keys[self.category_list.row(current_item)]
+        self.content_stack.setCurrentWidget(self.view_map[selected_key])
 
     def _create_text_view(self, is_mono=False):
         text_edit = QTextEdit(); text_edit.setReadOnly(True)
@@ -100,38 +94,30 @@ class DataHarvestPane(QWidget):
         return table
 
     def clear_all_views(self):
-        for view in self.views.values():
-            if isinstance(view, QTextEdit): view.clear()
+        for view in self.view_map.values():
+            if isinstance(view, QTextEdit): view.setText("Awaiting data...")
             elif isinstance(view, QTableWidget): view.setRowCount(0)
 
-    def update_view(self, command_name, data):
-        view = self.view_map.get(command_name)
+    def update_view(self, module_name, data):
+        view = self.view_map.get(module_name)
         if not view: return
 
+        if data.get("status") == "error":
+            if isinstance(view, QTextEdit):
+                view.setText(f"Error harvesting this module:\n\n{data.get('data', 'No details provided.')}")
+            return
+
+        payload = data.get('data')
         if isinstance(view, QTextEdit):
-            self._populate_text_view(view, data, command_name)
+            self._populate_text_view(view, payload)
         elif isinstance(view, QTableWidget):
-            self._populate_table(view, data)
+            self._populate_table(view, payload)
 
-    def _populate_text_view(self, view, data, command_name):
+    def _populate_text_view(self, view, data):
         if not data: view.setText("No data found."); return
-        
-        # Specific handling for combined views like os_info and network_info
-        if command_name in ["os_info", "hardware_info", "security_products", "network_info"]:
-            current_html = view.toHtml()
-            # A simple way to avoid re-adding the same title
-            if not current_html:
-                 current_html = f"<h3>{command_name.replace('_', ' ').title()}</h3>"
-
-            html_to_add = ""
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    key_formatted = key.replace("_", " ").title()
-                    value_formatted = f"<pre>{str(value)}</pre>" if isinstance(value, str) and '\n' in value else str(value)
-                    html_to_add += f"<p><b>{key_formatted}:</b> {value_formatted}</p>"
-            else:
-                 html_to_add += f"<p>{str(data)}</p>"
-            view.setHtml(current_html + html_to_add)
+        if isinstance(data, dict):
+            html = "".join([f"<p><b>{key.replace('_', ' ').title()}:</b> {value}</p>" for key, value in data.items()])
+            view.setHtml(html)
         elif isinstance(data, list):
              view.setText("\n".join(data))
         else:
@@ -139,12 +125,12 @@ class DataHarvestPane(QWidget):
 
     def _populate_table(self, table, data_list):
         if not isinstance(data_list, list) or not data_list: table.setRowCount(0); return
-        
-        # Append rows instead of replacing them
-        start_row = table.rowCount()
-        table.setRowCount(start_row + len(data_list))
+        table.setRowCount(len(data_list))
         for row_idx, row_data in enumerate(data_list):
             if isinstance(row_data, list):
-                 for col_idx, cell_data in enumerate(row_data):
-                     table.setItem(start_row + row_idx, col_idx, QTableWidgetItem(str(cell_data)))
+                 for col_idx, cell_data in enumerate(row_data): table.setItem(row_idx, col_idx, QTableWidgetItem(str(cell_data)))
+            elif isinstance(row_data, dict): # For lists of dicts like Installed Apps
+                 for col_idx, header in enumerate([table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]):
+                     table.setItem(row_idx, col_idx, QTableWidgetItem(str(row_data.get(header.lower(), 'N/A'))))
+
         table.resizeColumnsToContents()
