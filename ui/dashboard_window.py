@@ -3,7 +3,6 @@ from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QSplitter, QTableWidget, QVBo
                              QLabel, QHeaderView, QTableWidgetItem,
                              QPushButton)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont
 from ui.builder_pane import BuilderPane
 from ui.options_pane import OptionsPane
 
