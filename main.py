@@ -121,7 +121,11 @@ class MainWindow(QMainWindow):
         
         # Centralized saving of all incoming data
         if command and output.get("status") == "success":
-            self.db.save_result(session_id, command, output.get("data"))
+            # Ensure the data is a string before saving
+            data_to_save = output.get("data")
+            if not isinstance(data_to_save, str):
+                data_to_save = json.dumps(data_to_save)
+            self.db.save_result(session_id, command, data_to_save)
 
         if command == "Agent Event":
             self.session_view.handle_agent_event(session_id, output)
@@ -155,7 +159,10 @@ class MainWindow(QMainWindow):
             self.dashboard_view.builder_pane.back_to_builder_button.show()
     
     def handle_sign_out(self):
-        self.db.save_setting("remembered_user", "")
+        remember_me = self.db.load_setting("remember_me", True)
+        if not remember_me:
+            self.db.save_setting("remembered_user", "")
+
         if self.dashboard_view:
             self.dashboard_view.stop_polling()
             self.stack.removeWidget(self.dashboard_view)
@@ -165,6 +172,7 @@ class MainWindow(QMainWindow):
             self.stack.removeWidget(self.session_view)
             self.session_view.deleteLater()
             self.session_view = None
+            
         self.current_user = None
         self.stack.setCurrentWidget(self.login_screen)
 

