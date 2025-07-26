@@ -1,4 +1,4 @@
-# main.py (Full Code - Final Architecture)
+# main.py (Full Code - Corrected Constructor Call)
 import sys
 import psutil
 import json
@@ -82,7 +82,10 @@ class MainWindow(QMainWindow):
     def show_dashboard_view(self, username):
         self.current_user = username
         self.dashboard_view = DashboardWindow(self.api, self.db, self.current_user)
-        self.session_view = SessionView()
+        
+        # --- DEFINITIVE BUG FIX APPLIED HERE ---
+        # The db manager is now correctly passed to the SessionView constructor again.
+        self.session_view = SessionView(self.db)
         
         self.stack.addWidget(self.dashboard_view)
         self.stack.addWidget(self.session_view)
@@ -93,7 +96,7 @@ class MainWindow(QMainWindow):
         self.dashboard_view.session_interact_requested.connect(self.open_session_view)
         self.session_view.back_requested.connect(lambda: self.stack.setCurrentWidget(self.dashboard_view))
         self.session_view.task_requested.connect(self.dashboard_view.send_task_from_session)
-        self.dashboard_view.response_received.connect(self.session_view.handle_command_response)
+        self.dashboard_view.data_updated_for_session.connect(self.session_view.handle_command_response)
 
         self.stack.setCurrentWidget(self.dashboard_view)
         self.statusBar().showMessage(f"Logged in as {username}.", 3000)

