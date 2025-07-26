@@ -1,4 +1,4 @@
-# relay_server.py (Full Code - Final Stability Revamp)
+# relay_server.py (Full Code - Corrected for Root Deployment)
 import sqlite3
 import json
 import time
@@ -113,4 +113,5 @@ def index(): return "TetherC2 Relay is operational."
 
 if __name__ == '__main__':
     print("[RELAY] TetherC2 Relay is operational.")
+    # This block is for local testing. Render will use a gunicorn command to run the app.
     app.run(host='0.0.0.0', port=5001)
