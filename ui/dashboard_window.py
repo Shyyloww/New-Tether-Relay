@@ -1,11 +1,9 @@
-# ui/dashboard_window.py (Corrected Imports)
+# ui/dashboard_window.py (Full Code - Reworked for Persistent Sessions)
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QSplitter, QTableWidget, QVBoxLayout, 
                              QLabel, QHeaderView, QTableWidgetItem,
                              QPushButton)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
-
-# Corrected: Imports are now absolute from the project root
 from ui.builder_pane import BuilderPane
 from ui.options_pane import OptionsPane
 
@@ -21,7 +19,7 @@ class DashboardWindow(QWidget):
         self.api = api_client
         self.db = db_manager
         self.username = username
-        self.sessions = {} # This will now store the full vault data
+        self.sessions = {} # Master dictionary holding all session data from the vault
 
         main_layout = QHBoxLayout(self)
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -64,7 +62,7 @@ class DashboardWindow(QWidget):
 
     def start_polling(self):
         self.load_initial_data()
-        self.poll_timer.start(5000) # Poll every 5 seconds
+        self.poll_timer.start(5000)
 
     def stop_polling(self):
         self.poll_timer.stop()
@@ -73,29 +71,24 @@ class DashboardWindow(QWidget):
         response = self.api.get_all_vault_data(self.username)
         if response and response.get("success"):
             self.sessions = response.get("data", {})
-            self.poll_for_updates() # Run once to get initial online status
+            self.update_session_table() # Display all sessions from the vault
+            self.poll_for_updates() # Immediately check for online status
 
     def poll_for_updates(self):
-        # Poll for live session statuses
         live_response = self.api.discover_sessions(self.username)
-        if live_response and 'sessions' in live_response:
-            live_sessions = live_response['sessions']
-            all_sids = set(self.sessions.keys()) | set(live_sessions.keys())
-            
-            needs_update = False
-            for sid in all_sids:
-                current_status = self.sessions.get(sid, {}).get('status', 'Offline')
-                new_status = 'Online' if sid in live_sessions else 'Offline'
-                if current_status != new_status:
-                    if sid not in self.sessions: # A new session we've never seen
-                        self.sessions[sid] = {'metadata': live_sessions[sid]}
-                    self.sessions[sid]['status'] = new_status
-                    needs_update = True
-            
-            if needs_update:
-                self.update_session_table()
+        live_sessions = live_response.get('sessions', {}) if live_response else {}
         
-        # Poll for responses for all our sessions
+        needs_ui_update = False
+        for sid, sdata in self.sessions.items():
+            current_status = sdata.get('status', 'Offline')
+            new_status = 'Online' if sid in live_sessions else 'Offline'
+            if current_status != new_status:
+                self.sessions[sid]['status'] = new_status
+                needs_ui_update = True
+        
+        if needs_ui_update:
+            self.update_session_table()
+        
         for session_id in self.sessions.keys():
             response_data = self.api.get_responses(self.username, session_id)
             if response_data and response_data.get("responses"):
@@ -109,7 +102,9 @@ class DashboardWindow(QWidget):
         self.session_table.setSortingEnabled(False)
         self.session_table.setRowCount(0)
         
-        for row, (session_id, data) in enumerate(self.sessions.items()):
+        sorted_sessions = sorted(self.sessions.items(), key=lambda item: item[1].get('status', 'Offline') == 'Online', reverse=True)
+
+        for row, (session_id, data) in enumerate(sorted_sessions):
             self.session_table.insertRow(row)
             self.session_table.setRowHeight(row, 55)
 
